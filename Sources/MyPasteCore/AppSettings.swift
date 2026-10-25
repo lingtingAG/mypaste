@@ -1,0 +1,128 @@
+import Foundation
+
+public final class AppSettings {
+    public static let shared = AppSettings()
+
+    private let defaults: UserDefaults
+    private let prefix = "com.mypaste."
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        defaults.register(defaults: [
+            prefix + "playSound": true,
+            prefix + "showMagnifier": true,
+            prefix + "autoSave": false,
+            prefix + "historyLimit": 50,
+            prefix + "toolLineWidth": 4.0,
+            prefix + "toolFontSize": 20.0,
+            prefix + "toolFilled": false,
+            prefix + "toolColor": RGBAColor.red.hexString,
+        ])
+    }
+
+    public var captureShortcut: Shortcut {
+        get { shortcut(forKey: "captureShortcut") ?? .capture }
+        set { setShortcut(newValue, forKey: "captureShortcut") }
+    }
+
+    public var pinShortcut: Shortcut {
+        get { shortcut(forKey: "pinShortcut") ?? .pin }
+        set { setShortcut(newValue, forKey: "pinShortcut") }
+    }
+
+    public var fullScreenShortcut: Shortcut {
+        get { shortcut(forKey: "fullScreenShortcut") ?? .fullScreen }
+        set { setShortcut(newValue, forKey: "fullScreenShortcut") }
+    }
+
+    public var playSound: Bool {
+        get { defaults.bool(forKey: prefix + "playSound") }
+        set { set(newValue, key: "playSound") }
+    }
+
+    public var showMagnifier: Bool {
+        get { defaults.bool(forKey: prefix + "showMagnifier") }
+        set { set(newValue, key: "showMagnifier") }
+    }
+
+    public var autoSave: Bool {
+        get { defaults.bool(forKey: prefix + "autoSave") }
+        set { set(newValue, key: "autoSave") }
+    }
+
+    public var historyLimit: Int {
+        get { max(10, defaults.integer(forKey: prefix + "historyLimit")) }
+        set { set(max(10, newValue), key: "historyLimit") }
+    }
+
+    public var toolLineWidth: CGFloat {
+        get {
+            let value = defaults.double(forKey: prefix + "toolLineWidth")
+            return value > 0 ? CGFloat(value) : 4
+        }
+        set { set(Double(newValue), key: "toolLineWidth") }
+    }
+
+    public var toolFontSize: CGFloat {
+        get {
+            let value = defaults.double(forKey: prefix + "toolFontSize")
+            return value > 0 ? min(120, max(10, CGFloat(value))) : 20
+        }
+        set { set(Double(min(120, max(10, newValue))), key: "toolFontSize") }
+    }
+
+    public var toolFilled: Bool {
+        get { defaults.bool(forKey: prefix + "toolFilled") }
+        set { set(newValue, key: "toolFilled") }
+    }
+
+    public var toolColor: RGBAColor {
+        get {
+            if let raw = defaults.string(forKey: prefix + "toolColor"),
+               let color = RGBAColor(hexString: raw) {
+                return color
+            }
+            return .red
+        }
+        set { set(newValue.hexString, key: "toolColor") }
+    }
+
+    public var saveDirectory: URL {
+        get {
+            if let raw = defaults.string(forKey: prefix + "saveDirectory"), !raw.isEmpty {
+                return URL(fileURLWithPath: raw, isDirectory: true)
+            }
+            return Self.defaultSaveDirectory
+        }
+        set {
+            set(newValue.path, key: "saveDirectory")
+        }
+    }
+
+    public static var defaultSaveDirectory: URL {
+        let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        return pictures.appendingPathComponent("MyPaste", isDirectory: true)
+    }
+
+    public var hasCompletedWelcome: Bool {
+        get { defaults.bool(forKey: prefix + "hasCompletedWelcome") }
+        set { set(newValue, key: "hasCompletedWelcome") }
+    }
+
+    private func shortcut(forKey key: String) -> Shortcut? {
+        guard let data = defaults.data(forKey: prefix + key) else { return nil }
+        return try? JSONDecoder().decode(Shortcut.self, from: data)
+    }
+
+    private func setShortcut(_ shortcut: Shortcut, forKey key: String) {
+        guard let data = try? JSONEncoder().encode(shortcut) else { return }
+        defaults.set(data, forKey: prefix + key)
+        NotificationCenter.default.post(name: .myPasteSettingsDidChange, object: self)
+    }
+
+    private func set<T>(_ value: T, key: String) {
+        defaults.set(value, forKey: prefix + key)
+        NotificationCenter.default.post(name: .myPasteSettingsDidChange, object: self)
+    }
+}
