@@ -14,7 +14,9 @@ private final class HistoryCardView: NSView {
     var onActivate: ((Int) -> Void)?
     private var isHovering = false
     private var trackingAreaRef: NSTrackingArea?
-    private let thumbnail: NSImage?
+    var thumbnail: NSImage? {
+        didSet { needsDisplay = true }
+    }
     private let dateText: String
     private let detailText: String
 
@@ -237,6 +239,9 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
     private var entries: [HistoryEntry] = []
     private var selectedIndex: Int?
     private var thumbnails: [String: NSImage] = [:]
+    private var thumbnailOrder: [String] = []
+    private let thumbnailCacheLimit = 120
+    private var thumbnailLoadGeneration = 0
     private var historyObserver: NSObjectProtocol?
     private var lastGridWidth: CGFloat = 0
 
@@ -266,7 +271,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
 
     func makeSnapshotContentView() -> NSView? {
         ensureWindow()
-        reload()
+        reload(synchronously: true)
         if entries.count > 1 {
             select(index: 1)
         }
@@ -381,7 +386,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         self.window = window
         if historyObserver == nil {
             historyObserver = NotificationCenter.default.addObserver(
-                forName: HistoryStore.didChangeNotification,
+                forName: .myPasteHistoryDidChange,
                 object: store,
                 queue: .main
             ) { [weak self] _ in
@@ -406,31 +411,84 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         return button
     }
 
-    private func reload() {
+    private func reload(synchronously: Bool = false) {
         entries = store.entries()
+        thumbnailLoadGeneration += 1
         if let selectedIndex, selectedIndex >= entries.count {
             self.selectedIndex = nil
         }
         gridView?.rebuild(entries: entries) { [weak self] entry in
-            self?.thumbnail(for: entry)
+            self?.cachedThumbnail(for: entry)
         }
         emptyLabel?.isHidden = !entries.isEmpty
         countLabel?.stringValue = entries.isEmpty ? "" : "共 \(entries.count) 张 · 上限 \(AppSettings.shared.historyLimit) 张"
         refreshButtons()
         layoutSubtreeAndGrid(force: true)
+        if synchronously {
+            for entry in entries where thumbnails[entry.id] == nil {
+                if let image = Self.loadThumbnailImage(entry) {
+                    storeThumbnail(image, for: entry.id)
+                    if let index = entries.firstIndex(where: { $0.id == entry.id }),
+                       let cards = gridView?.cards, cards.indices.contains(index) {
+                        cards[index].thumbnail = image
+                    }
+                }
+            }
+        } else {
+            loadMissingThumbnailsAsync()
+        }
     }
 
-    private func thumbnail(for entry: HistoryEntry) -> NSImage? {
-        if let cached = thumbnails[entry.id] { return cached }
-        if let image = NSImage(contentsOf: entry.thumbnailURL) {
-            thumbnails[entry.id] = image
+    private func cachedThumbnail(for entry: HistoryEntry) -> NSImage? {
+        guard let image = thumbnails[entry.id] else { return nil }
+        thumbnailOrder.removeAll { $0 == entry.id }
+        thumbnailOrder.append(entry.id)
+        return image
+    }
+
+    private func storeThumbnail(_ image: NSImage, for id: String) {
+        thumbnails[id] = image
+        thumbnailOrder.removeAll { $0 == id }
+        thumbnailOrder.append(id)
+        while thumbnailOrder.count > thumbnailCacheLimit, let oldest = thumbnailOrder.first {
+            thumbnailOrder.removeFirst()
+            thumbnails.removeValue(forKey: oldest)
+        }
+    }
+
+    private func loadMissingThumbnailsAsync() {
+        let generation = thumbnailLoadGeneration
+        let pending = entries.filter { thumbnails[$0.id] == nil }
+        guard !pending.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            for entry in pending {
+                guard let image = Self.loadThumbnailImage(entry) else { continue }
+                DispatchQueue.main.async {
+                    guard let self, self.thumbnailLoadGeneration == generation else { return }
+                    self.storeThumbnail(image, for: entry.id)
+                    if let index = self.entries.firstIndex(where: { $0.id == entry.id }),
+                       let cards = self.gridView?.cards, cards.indices.contains(index) {
+                        cards[index].thumbnail = image
+                    }
+                }
+            }
+        }
+    }
+
+    private nonisolated static func loadThumbnailImage(_ entry: HistoryEntry) -> NSImage? {
+        if FileManager.default.fileExists(atPath: entry.thumbnailURL.path),
+           let image = NSImage(contentsOf: entry.thumbnailURL) {
             return image
         }
-        if let image = NSImage(contentsOf: entry.url) {
-            thumbnails[entry.id] = image
-            return image
-        }
-        return nil
+        // 缩略图缺失时用 ImageIO 降采样原图，避免把全分辨率图载入内存缓存
+        guard let source = CGImageSourceCreateWithURL(entry.url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 640,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return NSImage(cgImage: cgImage, size: CGSize(width: cgImage.width, height: cgImage.height))
     }
 
     private func select(index: Int) {
@@ -498,9 +556,10 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
 
     @objc private func deleteSelected() {
         guard let entry = selectedEntry else { return }
-        store.delete(entry)
         selectedIndex = nil
-        reload()
+        refreshButtons()
+        // 删除在 store 队列异步执行，完成后由 didChange 通知触发 reload
+        store.delete(entry)
     }
 
     @objc private func clearHistory() {
@@ -513,10 +572,10 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         alert.addButton(withTitle: "取消")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
-            self?.store.clear()
             self?.selectedIndex = nil
             self?.thumbnails.removeAll()
-            self?.reload()
+            self?.thumbnailOrder.removeAll()
+            self?.store.clear()
         }
     }
 
@@ -565,6 +624,8 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
     public func windowWillClose(_ notification: Notification) {
         entries.removeAll()
         thumbnails.removeAll()
+        thumbnailOrder.removeAll()
+        thumbnailLoadGeneration += 1
         if let grid = gridView {
             grid.cards.forEach { $0.removeFromSuperview() }
             grid.cards.removeAll()
@@ -577,8 +638,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         buttons.removeAll()
         selectedIndex = nil
         lastGridWidth = 0
-        DispatchQueue.main.async { [weak self] in
-            self?.window = nil
-        }
+        // 同步置空，避免关闭后立即重开时复用已清空的旧窗口
+        window = nil
     }
 }

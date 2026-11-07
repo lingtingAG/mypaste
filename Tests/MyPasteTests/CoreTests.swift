@@ -32,6 +32,15 @@ final class CoreTests: XCTestCase {
         XCTAssertNil(Geometry.handleHit(at: CGPoint(x: 200, y: 150), in: rect))
     }
 
+    func testHandleHitCornerPriorityWithLargeTolerance() {
+        // 小选区 + 大 tolerance 时角与边热区重叠，角必须优先且结果稳定
+        let rect = CGRect(x: 100, y: 100, width: 20, height: 20)
+        for _ in 0..<10 {
+            XCTAssertEqual(Geometry.handleHit(at: CGPoint(x: 100, y: 100), in: rect, tolerance: 15), .topLeft)
+            XCTAssertEqual(Geometry.handleHit(at: CGPoint(x: 120, y: 120), in: rect, tolerance: 15), .bottomRight)
+        }
+    }
+
     func testResizeRectMinimumSizeAndBounds() {
         let rect = CGRect(x: 100, y: 100, width: 100, height: 100)
         let resized = Geometry.resizedRect(
@@ -297,13 +306,165 @@ final class CoreTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: entry.thumbnailURL.path))
             XCTAssertEqual(entry.pixelSize, CGSize(width: 120, height: 80))
         }
+    }
 
-        if let first = entries.first {
-            store.delete(first)
-            XCTAssertEqual(store.entries().count, 1)
-        }
+    func testHistoryDeleteAndClearAreAsyncAndConsistent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 60, height: 40)
+        _ = try store.recordSync(image, limit: 10)
+        _ = try store.recordSync(image, limit: 10)
+        XCTAssertEqual(store.entries().count, 2)
+
+        // delete/clear 走内部队列，entries() 与之串行，不会读到竞争状态
+        let deleted = expectation(description: "history change after delete")
+        let observer = NotificationCenter.default.addObserver(
+            forName: .myPasteHistoryDidChange,
+            object: store,
+            queue: .main
+        ) { _ in deleted.fulfill() }
+        store.delete(store.entries()[0])
+        wait(for: [deleted], timeout: 5)
+        NotificationCenter.default.removeObserver(observer)
+        XCTAssertEqual(store.entries().count, 1)
+
         store.clear()
+        // clear 异步执行，通过队列串行的 entries() 观察最终状态
+        let deadline = Date().addingTimeInterval(5)
+        while !store.entries().isEmpty, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
         XCTAssertEqual(store.entries().count, 0)
+    }
+
+    func testHistoryPruneByDiskBudget() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 200, height: 150)
+
+        var entries: [HistoryEntry] = []
+        for _ in 0..<4 {
+            entries.append(try store.recordSync(image, limit: 100))
+        }
+        let fileSize = entries[0].fileSize
+        XCTAssertGreaterThan(fileSize, 0)
+        // 预算只够 2 个文件：从最旧删除，保留最新两条
+        try store.prune(limit: 100, diskLimitBytes: fileSize * 2)
+        let remaining = store.entries()
+        XCTAssertEqual(remaining.count, 2)
+        XCTAssertEqual(Set(remaining.map(\.id)), Set(entries.suffix(2).map(\.id)))
+
+        // 预算小于单文件时至少保留最新一条
+        try store.prune(limit: 100, diskLimitBytes: 1)
+        XCTAssertEqual(store.entries().count, 1)
+        XCTAssertEqual(store.entries()[0].id, entries.last?.id)
+    }
+
+    func testHistoryRecordReusesProvidedPNGData() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 80, height: 60)
+        let png = try XCTUnwrap(ImageExporter.pngData(image))
+        let entry = try store.recordSync(image, pngData: png, limit: 10)
+        XCTAssertEqual(try Data(contentsOf: entry.url), png)
+        XCTAssertEqual(entry.fileSize, Int64(png.count))
+    }
+
+    func testHistoryRecordAsyncCompletion() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+        let recorded = expectation(description: "record completion")
+        store.record(image, completion: { entry in
+            XCTAssertNotNil(entry)
+            recorded.fulfill()
+        }, onError: { error in
+            XCTFail("unexpected error: \(error)")
+        })
+        wait(for: [recorded], timeout: 5)
+        XCTAssertEqual(store.entries().count, 1)
+    }
+
+    // MARK: - Pixel sampling
+
+    func testPixelSamplerMatchesOrientationAndBounds() throws {
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: 20,
+            height: 20,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(NSColor.blue.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: 20, height: 10))
+        context.setFillColor(NSColor.red.cgColor)
+        context.fill(CGRect(x: 0, y: 10, width: 20, height: 10))
+        let image = try XCTUnwrap(context.makeImage())
+        let sampler = PixelSampler(image: image)
+
+        // 与 averageColor 相同的 top-left/y-down 像素坐标约定：y=2 取到红色
+        let top = try XCTUnwrap(sampler.color(at: CGPoint(x: 10, y: 2)))
+        let bottom = try XCTUnwrap(sampler.color(at: CGPoint(x: 10, y: 17)))
+        let averageTop = try XCTUnwrap(AnnotationRenderer.averageColor(of: image, at: CGPoint(x: 10, y: 2)))
+        let averageBottom = try XCTUnwrap(AnnotationRenderer.averageColor(of: image, at: CGPoint(x: 10, y: 17)))
+        XCTAssertEqual(top.red, averageTop.red, accuracy: 0.02)
+        XCTAssertEqual(top.blue, averageTop.blue, accuracy: 0.02)
+        XCTAssertEqual(bottom.red, averageBottom.red, accuracy: 0.02)
+        XCTAssertEqual(bottom.blue, averageBottom.blue, accuracy: 0.02)
+        XCTAssertGreaterThan(top.red, 0.8)
+        XCTAssertGreaterThan(bottom.blue, 0.8)
+        XCTAssertNil(sampler.color(at: CGPoint(x: -1, y: 0)))
+        XCTAssertNil(sampler.color(at: CGPoint(x: 0, y: 20)))
+    }
+
+    // MARK: - Export and settings
+
+    func testExporterFormatBranches() throws {
+        let image = try makeTestImage(width: 40, height: 30)
+        let png = try XCTUnwrap(ImageExporter.data(for: image, fileExtension: "png"))
+        let jpeg = try XCTUnwrap(ImageExporter.data(for: image, fileExtension: "jpg"))
+        let tiff = try XCTUnwrap(ImageExporter.data(for: image, fileExtension: "tiff"))
+        XCTAssertEqual(png.prefix(4), Data([0x89, 0x50, 0x4E, 0x47]))
+        XCTAssertEqual(jpeg.prefix(2), Data([0xFF, 0xD8]))
+        XCTAssertTrue(tiff.starts(with: Data([0x49, 0x49])) || tiff.starts(with: Data([0x4D, 0x4D])))
+        XCTAssertNotNil(ImageExporter.data(for: image, fileExtension: "unknown"))
+    }
+
+    func testTimestampedFileNames() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let name = ImageExporter.timestampedFileName(date: date)
+        XCTAssertTrue(name.hasPrefix("MyPaste_"))
+        XCTAssertTrue(name.hasSuffix(".png"))
+        XCTAssertEqual(name, ImageExporter.timestampedFileName(date: date))
+        XCTAssertTrue(ImageExporter.timestampBase(date: date).hasPrefix("MyPaste_"))
+        XCTAssertFalse(ImageExporter.timestampBase(date: date).contains("."))
+    }
+
+    func testSettingsClamping() throws {
+        let suite = "MyPasteTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+
+        settings.toolFontSize = 500
+        XCTAssertEqual(settings.toolFontSize, 120)
+        settings.toolFontSize = 1
+        XCTAssertEqual(settings.toolFontSize, 10)
+        settings.historyLimit = 1
+        XCTAssertEqual(settings.historyLimit, 10)
+        settings.historyDiskLimitMB = 1
+        XCTAssertEqual(settings.historyDiskLimitMB, 100)
+        XCTAssertEqual(TextMetrics.clampedFontSize(42), 42)
     }
 
     // MARK: - Helpers

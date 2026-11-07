@@ -51,18 +51,35 @@ public enum ImageExporter {
         try data.write(to: url, options: .atomic)
     }
 
-    public static func timestampedFileName(date: Date = Date(), fileExtension: String = "png") -> String {
+    // DateFormatter 创建开销高且非线程安全，静态复用并加锁
+    private static let formatterLock = NSLock()
+    private static let fileFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
-        return "MyPaste_\(formatter.string(from: date)).\(fileExtension)"
-    }
-
-    public static func displayFileName(date: Date = Date(), fileExtension: String = "png") -> String {
+        return formatter
+    }()
+    private static let displayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return "MyPaste \(formatter.string(from: date)).\(fileExtension)"
+        return formatter
+    }()
+
+    public static func timestampBase(date: Date = Date()) -> String {
+        formatterLock.lock()
+        defer { formatterLock.unlock() }
+        return "MyPaste_\(fileFormatter.string(from: date))"
+    }
+
+    public static func timestampedFileName(date: Date = Date(), fileExtension: String = "png") -> String {
+        "\(timestampBase(date: date)).\(fileExtension)"
+    }
+
+    public static func displayFileName(date: Date = Date(), fileExtension: String = "png") -> String {
+        formatterLock.lock()
+        defer { formatterLock.unlock() }
+        return "MyPaste \(displayFormatter.string(from: date)).\(fileExtension)"
     }
 }
 
@@ -70,18 +87,41 @@ public enum PasteboardWriter {
     public static func writeImage(_ image: CGImage) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        if let png = ImageExporter.pngData(image) {
-            pasteboard.setData(png, forType: .png)
-        }
-        if let tiff = ImageExporter.tiffData(image) {
-            pasteboard.setData(tiff, forType: .tiff)
-        }
+        let item = NSPasteboardItem()
+        // 惰性提供数据：复制时不阻塞主线程编码，读取方按需触发
+        item.setDataProvider(LazyImageDataProvider(image: image), forTypes: [.png, .tiff])
+        pasteboard.writeObjects([item])
     }
 
     public static func writeText(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+    }
+}
+
+private final class LazyImageDataProvider: NSObject, NSPasteboardItemDataProvider {
+    private let image: CGImage
+    private var png: Data?
+    private var tiff: Data?
+
+    init(image: CGImage) {
+        self.image = image
+    }
+
+    func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {
+        if type == .png {
+            if png == nil { png = ImageExporter.pngData(image) }
+            if let png { item.setData(png, forType: .png) }
+        } else if type == .tiff {
+            if tiff == nil { tiff = ImageExporter.tiffData(image) }
+            if let tiff { item.setData(tiff, forType: .tiff) }
+        }
+    }
+
+    func pasteboardFinishedWithDataProvider(_ pasteboard: NSPasteboard) {
+        png = nil
+        tiff = nil
     }
 }
 

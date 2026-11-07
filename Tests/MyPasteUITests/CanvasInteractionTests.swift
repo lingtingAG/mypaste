@@ -223,6 +223,176 @@ final class CanvasInteractionTests: XCTestCase {
         XCTAssertEqual(composed.height, 600)
     }
 
+    func testEffectiveScaleDerivesFromImage() {
+        // HiDPI 缩放分辨率：图像实际像素与 backingScaleFactor 推算不一致时以图像为准
+        XCTAssertEqual(
+            CapturedScreen.effectiveScale(imageWidth: 3840, frameWidth: 1920, fallback: 2),
+            2,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            CapturedScreen.effectiveScale(imageWidth: 2560, frameWidth: 1440, fallback: 2),
+            2560.0 / 1440.0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            CapturedScreen.effectiveScale(imageWidth: 1800, frameWidth: 1440, fallback: 2),
+            1.25,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            CapturedScreen.effectiveScale(imageWidth: 0, frameWidth: 1440, fallback: 2),
+            2,
+            accuracy: 0.001
+        )
+    }
+
+    func testPenDrawingCollectsPoints() {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
+        press("b", keyCode: 11)
+        sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 150), clickCount: 1)
+        sendMouse(.leftMouseDragged, at: CGPoint(x: 200, y: 180), clickCount: 1)
+        sendMouse(.leftMouseDragged, at: CGPoint(x: 260, y: 200), clickCount: 1)
+        sendMouse(.leftMouseUp, at: CGPoint(x: 260, y: 200), clickCount: 1)
+        XCTAssertEqual(canvas.annotations.count, 1)
+        guard case let .pen(points) = canvas.annotations[0].kind else {
+            return XCTFail("Expected pen annotation")
+        }
+        XCTAssertGreaterThanOrEqual(points.count, 3)
+    }
+
+    func testShiftConstrainsSquareAndArrowAngle() throws {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
+        press("r", keyCode: 15)
+        sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 150), clickCount: 1, modifiers: .shift)
+        sendMouse(.leftMouseDragged, at: CGPoint(x: 300, y: 210), clickCount: 1, modifiers: .shift)
+        sendMouse(.leftMouseUp, at: CGPoint(x: 300, y: 210), clickCount: 1, modifiers: .shift)
+        guard case let .rectangle(rect) = canvas.annotations[0].kind else {
+            return XCTFail("Expected rectangle")
+        }
+        XCTAssertEqual(rect.width, rect.height, accuracy: 0.5)
+
+        press("a", keyCode: 0)
+        sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 300), clickCount: 1, modifiers: .shift)
+        sendMouse(.leftMouseDragged, at: CGPoint(x: 300, y: 320), clickCount: 1, modifiers: .shift)
+        sendMouse(.leftMouseUp, at: CGPoint(x: 300, y: 320), clickCount: 1, modifiers: .shift)
+        guard case let .arrow(from, to) = canvas.annotations[1].kind else {
+            return XCTFail("Expected arrow")
+        }
+        let angle = atan2(to.y - from.y, to.x - from.x) * 180 / .pi
+        XCTAssertEqual(angle.truncatingRemainder(dividingBy: 45), 0, accuracy: 0.5)
+    }
+
+    func testRightClickCancelsStrokeButKeepsSession() {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
+        press("r", keyCode: 15)
+        sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 150), clickCount: 1)
+        sendMouse(.leftMouseDragged, at: CGPoint(x: 300, y: 250), clickCount: 1)
+        canvas.rightMouseDown(with: NSEvent.mouseEvent(
+            with: .rightMouseDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        )!)
+        XCTAssertTrue(canvas.annotations.isEmpty)
+        XCTAssertNotNil(canvas.selection)
+        // 会话未取消：仍可继续绘制
+        drag(from: CGPoint(x: 150, y: 150), to: CGPoint(x: 250, y: 220))
+        XCTAssertEqual(canvas.annotations.count, 1)
+    }
+
+    func testArrowKeysNudgeSelection() throws {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 400, y: 300))
+        sendKey(keyCode: 124)
+        sendKey(keyCode: 125)
+        let selection = try XCTUnwrap(canvas.selection)
+        XCTAssertEqual(selection.origin.x, 101, accuracy: 0.5)
+        XCTAssertEqual(selection.origin.y, 101, accuracy: 0.5)
+        sendKey(keyCode: 123, modifiers: .option)
+        XCTAssertEqual(try XCTUnwrap(canvas.selection).origin.x, 91, accuracy: 0.5)
+    }
+
+    func testUndoStackCappedAt50() {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 700, y: 550))
+        press("n", keyCode: 45)
+        for index in 0..<55 {
+            click(at: CGPoint(x: 120 + CGFloat(index) * 8, y: 150))
+        }
+        XCTAssertEqual(canvas.annotations.count, 55)
+        for _ in 0..<50 { canvas.undo(nil) }
+        XCTAssertEqual(canvas.annotations.count, 5)
+        canvas.undo(nil)
+        XCTAssertEqual(canvas.annotations.count, 5)
+    }
+
+    func testCachedAnnotationLayerRendersSameAsDirect() throws {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
+        press("r", keyCode: 15)
+        drag(from: CGPoint(x: 150, y: 150), to: CGPoint(x: 350, y: 280))
+        press("n", keyCode: 45)
+        click(at: CGPoint(x: 420, y: 350))
+
+        func renderCanvas() throws -> CGImage {
+            let rep = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds))
+            canvas.cacheDisplay(in: canvas.bounds, to: rep)
+            return try XCTUnwrap(rep.cgImage)
+        }
+
+        // 第一次渲染建立缓存位图层，第二次走缓存路径；两者必须像素一致
+        let first = try renderCanvas()
+        let second = try renderCanvas()
+        XCTAssertEqual(first.width, second.width)
+        XCTAssertEqual(first.height, second.height)
+        let firstSampler = PixelSampler(image: first)
+        let secondSampler = PixelSampler(image: second)
+        var mismatches = 0
+        for y in stride(from: 0, to: first.height, by: 3) {
+            for x in stride(from: 0, to: first.width, by: 3) {
+                let a = firstSampler.color(at: CGPoint(x: x, y: y))
+                let b = secondSampler.color(at: CGPoint(x: x, y: y))
+                if a != b { mismatches += 1 }
+            }
+        }
+        XCTAssertEqual(mismatches, 0)
+
+        // 缓存位图本身与导出合成器渲染的标注层一致（所见即所得）
+        let selection = try XCTUnwrap(canvas.selection)
+        let source = RenderSource(
+            image: captured.image,
+            originInImage: CGPoint(x: selection.minX * captured.scale, y: selection.minY * captured.scale),
+            pixelsPerPoint: captured.scale
+        )
+        let cacheImage = try XCTUnwrap(canvas.renderAnnotationCache(
+            canvas.annotations,
+            size: selection.size,
+            source: source
+        ))
+        let composed = try XCTUnwrap(ImageComposer.compose(
+            baseImage: captured.image,
+            selectionRect: selection,
+            screenScale: captured.scale,
+            annotations: canvas.annotations
+        ))
+        XCTAssertEqual(cacheImage.width, composed.width)
+        XCTAssertEqual(cacheImage.height, composed.height)
+        // 序号圆心局部坐标 (320, 250)：中心被白色数字覆盖，取圆内左侧纯色区域
+        let dotPoint = CGPoint(x: 310 * captured.scale, y: 250 * captured.scale)
+        let cacheColor = try XCTUnwrap(PixelSampler(image: cacheImage).color(at: dotPoint))
+        let composedColor = try XCTUnwrap(PixelSampler(image: composed).color(at: dotPoint))
+        let expected = canvas.annotations[1].color
+        XCTAssertEqual(cacheColor.red, expected.red, accuracy: 0.08)
+        XCTAssertEqual(cacheColor.green, expected.green, accuracy: 0.08)
+        XCTAssertEqual(cacheColor.blue, expected.blue, accuracy: 0.08)
+        XCTAssertEqual(composedColor.red, cacheColor.red, accuracy: 0.02)
+        XCTAssertEqual(composedColor.green, cacheColor.green, accuracy: 0.02)
+        XCTAssertEqual(composedColor.blue, cacheColor.blue, accuracy: 0.02)
+    }
+
     // MARK: - Event helpers
 
     private func drag(from: CGPoint, to: CGPoint) {
@@ -236,8 +406,8 @@ final class CanvasInteractionTests: XCTestCase {
         sendMouse(.leftMouseUp, at: point, clickCount: 1)
     }
 
-    private func sendMouse(_ type: NSEvent.EventType, at point: CGPoint, clickCount: Int) {
-        guard let event = makeMouseEvent(type, at: point, clickCount: clickCount) else {
+    private func sendMouse(_ type: NSEvent.EventType, at point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags = []) {
+        guard let event = makeMouseEvent(type, at: point, clickCount: clickCount, modifiers: modifiers) else {
             XCTFail("Failed to create mouse event")
             return
         }
@@ -262,12 +432,12 @@ final class CanvasInteractionTests: XCTestCase {
         view.mouseUp(with: up)
     }
 
-    private func makeMouseEvent(_ type: NSEvent.EventType, at point: CGPoint, clickCount: Int) -> NSEvent? {
+    private func makeMouseEvent(_ type: NSEvent.EventType, at point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags = []) -> NSEvent? {
         let windowPoint = CGPoint(x: point.x, y: (window.contentView?.bounds.height ?? 600) - point.y)
         return NSEvent.mouseEvent(
             with: type,
             location: windowPoint,
-            modifierFlags: [],
+            modifierFlags: modifiers,
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: 0,
             context: nil,
@@ -275,6 +445,25 @@ final class CanvasInteractionTests: XCTestCase {
             clickCount: clickCount,
             pressure: 1
         )
+    }
+
+    private func sendKey(keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: keyCode
+        ) else {
+            XCTFail("Failed to create key event")
+            return
+        }
+        canvas.keyDown(with: event)
     }
 
     private func press(_ character: String, keyCode: UInt16) {

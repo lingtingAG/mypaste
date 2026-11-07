@@ -14,6 +14,13 @@ public struct CapturedScreen {
     }
 
     public var frame: CGRect { screen.frame }
+
+    /// HiDPI 缩放分辨率下 backingScaleFactor 可能与实际截图像素不符，
+    /// 用图像实际宽度反推 points→pixels 比例
+    public static func effectiveScale(imageWidth: Int, frameWidth: CGFloat, fallback: CGFloat) -> CGFloat {
+        guard frameWidth > 0, imageWidth > 0 else { return max(0.01, fallback) }
+        return max(0.01, CGFloat(imageWidth) / frameWidth)
+    }
 }
 
 public enum ScreenCaptureError: LocalizedError {
@@ -52,47 +59,76 @@ public final class ScreenCaptureService {
         guard hasPermission else { throw ScreenCaptureError.permissionDenied }
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        var captured: [CapturedScreen] = []
-
-        for screen in NSScreen.screens {
-            guard let displayID = screen.mpDisplayID else { continue }
-            guard let display = content.displays.first(where: { $0.displayID == displayID }) else { continue }
-
-            let scale = screen.backingScaleFactor
-            let pixelWidth = max(1, Int((screen.frame.width * scale).rounded()))
-            let pixelHeight = max(1, Int((screen.frame.height * scale).rounded()))
-
-            let configuration = SCStreamConfiguration()
-            configuration.width = pixelWidth
-            configuration.height = pixelHeight
-            configuration.showsCursor = false
-            configuration.scalesToFit = false
-            configuration.captureResolution = .best
-            configuration.ignoreShadowsSingleWindow = true
-
-            let filter = SCContentFilter(display: display, excludingWindows: [])
-            do {
-                let image = try await SCScreenshotManager.captureImage(
-                    contentFilter: filter,
-                    configuration: configuration
-                )
-                captured.append(CapturedScreen(screen: screen, image: image, scale: scale))
-            } catch {
-                throw ScreenCaptureError.captureFailed(error.localizedDescription)
+        let screens = NSScreen.screens
+        // 并行冻结各屏，缩多多屏冻结时刻差
+        var captured = [CapturedScreen?](repeating: nil, count: screens.count)
+        try await withThrowingTaskGroup(of: (Int, CapturedScreen).self) { group in
+            for (index, screen) in screens.enumerated() {
+                guard let displayID = screen.mpDisplayID,
+                      let display = content.displays.first(where: { $0.displayID == displayID }) else { continue }
+                group.addTask {
+                    let image = try await Self.captureImage(display: display, screen: screen)
+                    let scale = CapturedScreen.effectiveScale(
+                        imageWidth: image.width,
+                        frameWidth: screen.frame.width,
+                        fallback: screen.backingScaleFactor
+                    )
+                    return (index, CapturedScreen(screen: screen, image: image, scale: scale))
+                }
+            }
+            for try await (index, result) in group {
+                captured[index] = result
             }
         }
 
-        guard !captured.isEmpty else { throw ScreenCaptureError.noDisplays }
-        return captured
+        let result = captured.compactMap { $0 }
+        guard !result.isEmpty else { throw ScreenCaptureError.noDisplays }
+        return result
     }
 
+    /// 只抓目标点所在的屏幕，用于全屏截图等单屏场景，避免抓全部显示器
     public func captureScreen(under cocoaPoint: CGPoint) async throws -> CapturedScreen {
-        let screens = try await captureAllScreens()
-        if let match = screens.first(where: { $0.frame.contains(cocoaPoint) }) {
-            return match
+        guard hasPermission else { throw ScreenCaptureError.permissionDenied }
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(cocoaPoint) })
+            ?? NSScreen.main ?? NSScreen.screens.first else {
+            throw ScreenCaptureError.noDisplays
         }
-        guard let first = screens.first else { throw ScreenCaptureError.noDisplays }
-        return first
+        guard let displayID = screen.mpDisplayID else { throw ScreenCaptureError.displayNotFound }
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+            throw ScreenCaptureError.displayNotFound
+        }
+        let image = try await Self.captureImage(display: display, screen: screen)
+        let scale = CapturedScreen.effectiveScale(
+            imageWidth: image.width,
+            frameWidth: screen.frame.width,
+            fallback: screen.backingScaleFactor
+        )
+        return CapturedScreen(screen: screen, image: image, scale: scale)
+    }
+
+    private static func captureImage(display: SCDisplay, screen: NSScreen) async throws -> CGImage {
+        let scale = screen.backingScaleFactor
+        let pixelWidth = max(1, Int((screen.frame.width * scale).rounded()))
+        let pixelHeight = max(1, Int((screen.frame.height * scale).rounded()))
+
+        let configuration = SCStreamConfiguration()
+        configuration.width = pixelWidth
+        configuration.height = pixelHeight
+        configuration.showsCursor = false
+        configuration.scalesToFit = false
+        configuration.captureResolution = .best
+        configuration.ignoreShadowsSingleWindow = true
+
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        do {
+            return try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: configuration
+            )
+        } catch {
+            throw ScreenCaptureError.captureFailed(error.localizedDescription)
+        }
     }
 }
 

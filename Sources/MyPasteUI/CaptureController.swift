@@ -58,13 +58,8 @@ public final class CaptureController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let screens = try await self.service.captureAllScreens()
+                let captured = try await self.service.captureScreen(under: NSEvent.mouseLocation)
                 self.isCapturing = false
-                let mousePoint = NSEvent.mouseLocation
-                guard let captured = screens.first(where: { $0.frame.contains(mousePoint) }) ?? screens.first else {
-                    self.handleCaptureError(ScreenCaptureError.noDisplays)
-                    return
-                }
                 PasteboardWriter.writeImage(captured.image)
                 let result = CaptureResult(
                     image: captured.image,
@@ -170,19 +165,44 @@ public final class CaptureController {
     }
 
     private func archive(_ result: CaptureResult, autoSave: Bool) {
-        HistoryStore.shared.record(result.image)
-        guard autoSave, AppSettings.shared.autoSave else { return }
+        let shouldAutoSave = autoSave && AppSettings.shared.autoSave
         let directory = AppSettings.shared.saveDirectory
         let url = directory.appendingPathComponent(ImageExporter.timestampedFileName())
         let image = result.image
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            // PNG 只编码一次，历史记录与自动保存复用同一份数据
+            guard let png = ImageExporter.pngData(image) else {
+                DispatchQueue.main.async {
+                    self?.presentArchiveError(ImageExporter.ExportError.encodingFailed)
+                }
+                return
+            }
+            HistoryStore.shared.record(image, pngData: png, onError: { error in
+                DispatchQueue.main.async {
+                    self?.presentArchiveError(error)
+                }
+            })
+            guard shouldAutoSave else { return }
             do {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                try ImageExporter.write(image, to: url)
+                try png.write(to: url, options: .atomic)
             } catch {
-                NSLog("MyPaste auto-save failed: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self?.presentArchiveError(error)
+                }
             }
         }
+    }
+
+    private func presentArchiveError(_ error: Error) {
+        NSLog("MyPaste archive failed: \(error.localizedDescription)")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "保存截图失败"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        NSApp.activate()
+        alert.runModal()
     }
 
     private func playSound() {

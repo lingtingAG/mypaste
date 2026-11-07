@@ -15,6 +15,8 @@ private enum PinDragState {
     case resizing(corner: PinCorner, initialMouse: CGPoint, initialFrame: CGRect)
 }
 
+private let pinMaxWidth: CGFloat = 8000
+
 private final class PinWindow: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -163,7 +165,7 @@ private final class PinContentView: NSView {
             let verticalDelta: CGFloat = (corner == .topLeft || corner == .topRight) ? dy * aspect : -dy * aspect
             let useHorizontal = abs(horizontalDelta) >= abs(verticalDelta)
             let targetWidth = initialFrame.width + (useHorizontal ? horizontalDelta : verticalDelta)
-            let newWidth = min(max(40, targetWidth), 8000)
+            let newWidth = min(max(40, targetWidth), pinMaxWidth)
             let newHeight = newWidth / aspect
 
             var origin = initialFrame.origin
@@ -206,7 +208,7 @@ private final class PinContentView: NSView {
         let anchorX = (mouse.x - frame.minX) / max(1, frame.width)
         let anchorY = (mouse.y - frame.minY) / max(1, frame.height)
         let aspect = max(0.05, frame.width / max(1, frame.height))
-        let newWidth = min(max(40, frame.width * factor), 12000)
+        let newWidth = min(max(40, frame.width * factor), pinMaxWidth)
         let newHeight = newWidth / aspect
         let origin = CGPoint(
             x: mouse.x - anchorX * newWidth,

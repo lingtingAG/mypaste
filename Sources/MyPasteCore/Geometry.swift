@@ -76,7 +76,14 @@ public enum Geometry {
 
     public static func handleHit(at point: CGPoint, in rect: CGRect, tolerance: CGFloat = 7) -> ResizeHandle? {
         guard rect.width > 0, rect.height > 0 else { return nil }
-        for (handle, hitRect) in handleRects(for: rect) {
+        // 有序遍历：角热区优先于边，避免 tolerance 重叠时命中结果不确定
+        let rects = handleRects(for: rect)
+        let order: [ResizeHandle] = [
+            .topLeft, .topRight, .bottomLeft, .bottomRight,
+            .top, .bottom, .left, .right,
+        ]
+        for handle in order {
+            guard let hitRect = rects[handle] else { continue }
             if hitRect.insetBy(dx: -tolerance, dy: -tolerance).contains(point) {
                 return handle
             }

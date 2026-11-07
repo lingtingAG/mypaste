@@ -29,7 +29,7 @@ final class TextEditingBox: NSView, NSTextFieldDelegate {
         color: RGBAColor,
         text: String
     ) {
-        self.fontSize = min(120, max(10, fontSize))
+        self.fontSize = TextMetrics.clampedFontSize(fontSize)
         self.color = color
         let initialFieldWidth = max(60, width - TextMetrics.padding.width * 2)
         self.maxTextWidth = max(initialFieldWidth, maxWidth - TextMetrics.padding.width * 2)
@@ -81,7 +81,7 @@ final class TextEditingBox: NSView, NSTextFieldDelegate {
     }
 
     func updateFontSize(_ size: CGFloat) {
-        fontSize = min(120, max(10, size))
+        fontSize = TextMetrics.clampedFontSize(size)
         textField.font = TextMetrics.font(size: fontSize)
         updatePlaceholder()
         let bodyHeight = Self.bodyHeight(for: fontSize)

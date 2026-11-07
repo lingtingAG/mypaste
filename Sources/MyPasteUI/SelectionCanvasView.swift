@@ -27,6 +27,12 @@ private enum CanvasDragState {
     case movingText(id: UUID, start: CGPoint, initialOrigin: CGPoint)
 }
 
+private struct AnnotationCache {
+    let image: CGImage
+    let selectionSize: CGSize
+    let annotations: [Annotation]
+}
+
 public final class BaseImageView: NSView {
     public var image: CGImage? {
         didSet { needsDisplay = true }
@@ -55,7 +61,11 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     private let windowDetector = WindowDetector()
 
     private(set) var selection: CGRect?
-    private(set) var annotations: [Annotation] = []
+    private(set) var annotations: [Annotation] = [] {
+        didSet { annotationCache = nil }
+    }
+    private var annotationCache: AnnotationCache?
+    private lazy var pixelSampler = PixelSampler(image: captured.image)
     private var undoStack: [[Annotation]] = []
     private var redoStack: [[Annotation]] = []
     private var currentAnnotation: Annotation?
@@ -115,7 +125,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     }
 
     public override func resetCursorRects() {
-        addCursorRect(bounds, cursor: mode == .colorPicker ? .crosshair : .crosshair)
+        addCursorRect(bounds, cursor: .crosshair)
     }
 
     // MARK: - Pointer
@@ -393,6 +403,13 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     public override func rightMouseDown(with event: NSEvent) {
         if textEditingBox != nil {
             cancelTextEditing()
+            return
+        }
+        // 绘制中右键只取消当前笔画，不退出整个截图会话
+        if case .drawing = dragState {
+            dragState = .none
+            currentAnnotation = nil
+            needsDisplay = true
             return
         }
         session?.cancel()
@@ -964,7 +981,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     }
 
     private func applyFontSize(_ size: CGFloat) {
-        let clamped = min(120, max(10, size))
+        let clamped = TextMetrics.clampedFontSize(size)
         currentFontSize = clamped
         AppSettings.shared.toolFontSize = clamped
         if let box = textEditingBox {
@@ -999,7 +1016,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             x: floor(min(max(localPoint.x, 0), bounds.width - 0.001) * captured.scale),
             y: floor(min(max(localPoint.y, 0), bounds.height - 0.001) * captured.scale)
         )
-        return AnnotationRenderer.averageColor(of: captured.image, at: imagePoint)
+        return pixelSampler.color(at: imagePoint)
     }
 
     private func copyColorUnderCursor() {
@@ -1192,7 +1209,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         )
     }
 
-    private func showToast(_ text: String) {
+    func showToast(_ text: String) {
         toastText = text
         toastWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
@@ -1290,12 +1307,30 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         let visibleAnnotations = editingTextID == nil
             ? annotations
             : annotations.filter { $0.id != editingTextID }
-        AnnotationRenderer.draw(
-            annotations: visibleAnnotations,
-            in: context,
-            selectionSize: selection.size,
-            source: source
-        )
+        // 已提交标注缓存为位图层，鼠标移动/画笔拖动时不再全量重渲染；
+        // 缓存仍由 AnnotationRenderer 生成，保证与导出一致
+        let localRect = CGRect(origin: .zero, size: selection.size)
+        if let cache = annotationCache,
+           cache.selectionSize == selection.size,
+           cache.annotations == visibleAnnotations {
+            AnnotationRenderer.drawImageTopLeft(cache.image, in: localRect, in: context)
+        } else if !visibleAnnotations.isEmpty,
+                  let image = renderAnnotationCache(visibleAnnotations, size: selection.size, source: source) {
+            annotationCache = AnnotationCache(
+                image: image,
+                selectionSize: selection.size,
+                annotations: visibleAnnotations
+            )
+            AnnotationRenderer.drawImageTopLeft(image, in: localRect, in: context)
+        } else {
+            annotationCache = nil
+            AnnotationRenderer.draw(
+                annotations: visibleAnnotations,
+                in: context,
+                selectionSize: selection.size,
+                source: source
+            )
+        }
         if let currentAnnotation {
             AnnotationRenderer.draw(
                 annotation: currentAnnotation,
@@ -1304,6 +1339,32 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             )
         }
         context.restoreGState()
+    }
+
+    func renderAnnotationCache(
+        _ annotations: [Annotation],
+        size: CGSize,
+        source: RenderSource
+    ) -> CGImage? {
+        let scale = captured.scale
+        let width = max(1, Int((size.width * scale).rounded()))
+        let height = max(1, Int((size.height * scale).rounded()))
+        let colorSpace = captured.image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .high
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+        context.scaleBy(x: scale, y: scale)
+        AnnotationRenderer.draw(annotations: annotations, in: context, selectionSize: size, source: source)
+        return context.makeImage()
     }
 
     private func drawSelectionChrome(_ selection: CGRect, in context: CGContext) {

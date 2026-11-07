@@ -34,6 +34,7 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
     private var launchSwitch: NSSwitch?
     private var folderLabel: NSTextField?
     private var historyPopup: NSPopUpButton?
+    private var historyDiskPopup: NSPopUpButton?
     private var permissionLabel: NSTextField?
     private var permissionButton: NSButton?
     private var appActiveObserver: NSObjectProtocol?
@@ -172,6 +173,16 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         historyPopup.controlSize = .regular
         self.historyPopup = historyPopup
 
+        let historyDiskPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        for limit in [200, 500, 1024, 2048] {
+            historyDiskPopup.addItem(withTitle: "\(limit) MB")
+            historyDiskPopup.lastItem?.tag = limit
+        }
+        historyDiskPopup.target = self
+        historyDiskPopup.action = #selector(historyDiskLimitChanged(_:))
+        historyDiskPopup.controlSize = .regular
+        self.historyDiskPopup = historyDiskPopup
+
         let screenshotSection = makeSection(
             title: "截图与保存",
             rows: [
@@ -180,6 +191,7 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
                 makeRow(title: "复制后自动保存到文件夹", control: autoSave),
                 makeRow(title: "保存位置", control: folderStack),
                 makeRow(title: "保留历史记录", control: historyPopup),
+                makeRow(title: "历史磁盘上限", control: historyDiskPopup),
             ]
         )
 
@@ -310,6 +322,13 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
                 popup.selectItem(at: 1)
             }
         }
+        if let popup = historyDiskPopup {
+            if let index = popup.itemArray.firstIndex(where: { $0.tag == settings.historyDiskLimitMB }) {
+                popup.selectItem(at: index)
+            } else {
+                popup.selectItem(at: 1)
+            }
+        }
         refreshPermissionState()
         refreshLaunchAtLoginState()
     }
@@ -405,9 +424,14 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         let limit = sender.selectedTag()
         guard limit > 0 else { return }
         settings.historyLimit = limit
-        DispatchQueue.global(qos: .utility).async {
-            try? HistoryStore.shared.prune(limit: limit)
-        }
+        HistoryStore.shared.pruneAsync(limit: limit)
+    }
+
+    @objc private func historyDiskLimitChanged(_ sender: NSPopUpButton) {
+        let limit = sender.selectedTag()
+        guard limit > 0 else { return }
+        settings.historyDiskLimitMB = limit
+        HistoryStore.shared.pruneAsync(limit: settings.historyLimit, diskLimitMB: limit)
     }
 
     @objc private func chooseFolder() {

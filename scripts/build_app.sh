@@ -19,7 +19,8 @@ if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
 fi
 
 xattr -cr "$APP" 2>/dev/null || true
-codesign --force --deep --sign - --identifier com.mypaste.app "$APP" >/dev/null
+# 单二进制无需 --deep（Apple 已不推荐），直接对 bundle 签名
+codesign --force --sign - --identifier com.mypaste.app "$APP" >/dev/null
 
 echo "Built: $APP"
 echo "Run:   open \"$APP\""

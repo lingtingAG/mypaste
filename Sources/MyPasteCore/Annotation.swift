@@ -60,6 +60,12 @@ public enum AnnotationKind: Equatable, Sendable {
 
 public enum TextMetrics {
     public static let padding = CGSize(width: 6, height: 4)
+    public static let minFontSize: CGFloat = 10
+    public static let maxFontSize: CGFloat = 120
+
+    public static func clampedFontSize(_ size: CGFloat) -> CGFloat {
+        min(maxFontSize, max(minFontSize, size))
+    }
 
     public static func font(size: CGFloat) -> NSFont {
         NSFont.systemFont(ofSize: max(8, size), weight: .medium)

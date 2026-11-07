@@ -148,20 +148,31 @@ public final class CaptureSession {
     }
 
     public func canvasRequestCopy(_ canvas: SelectionCanvasView) {
-        guard !isClosed, let result = composeResult(from: canvas) else { return }
+        guard !isClosed else { return }
+        guard let result = composeResult(from: canvas) else {
+            canvas.showToast("合成截图失败，请调整选区后重试")
+            return
+        }
         close()
         callbacks.onCopy(result)
     }
 
     public func canvasRequestPin(_ canvas: SelectionCanvasView) {
-        guard !isClosed, let result = composeResult(from: canvas) else { return }
+        guard !isClosed else { return }
+        guard let result = composeResult(from: canvas) else {
+            canvas.showToast("合成截图失败，请调整选区后重试")
+            return
+        }
         close()
         callbacks.onPin(result)
     }
 
     public func canvasRequestSave(_ canvas: SelectionCanvasView) {
         guard !isClosed, !isPresentingPanel, let window = canvas.window else { return }
-        guard let result = composeResult(from: canvas) else { return }
+        guard let result = composeResult(from: canvas) else {
+            canvas.showToast("合成截图失败，请调整选区后重试")
+            return
+        }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff]

@@ -18,6 +18,52 @@ public struct RenderSource {
 public enum AnnotationRenderer {
     private static let ciContext = CIContext()
 
+    // 马赛克/模糊效果图缓存：拖动预览时同一 rect 每帧重算代价高，
+    // 按图像 + 区域 + 线宽缓存，rect 变化才失效。仅主线程渲染路径使用。
+    private struct EffectKey: Hashable {
+        let imageID: ObjectIdentifier
+        let originX: CGFloat
+        let originY: CGFloat
+        let scale: CGFloat
+        let isBlur: Bool
+        let rect: CGRect
+        let lineWidth: CGFloat
+    }
+    private struct CachedEffect {
+        let image: CGImage
+        let localRect: CGRect
+    }
+    private static var effectCache: [EffectKey: CachedEffect] = [:]
+    private static var effectCacheOrder: [EffectKey] = []
+    private static let effectCacheLimit = 12
+
+    private static func cachedEffect(
+        key: EffectKey,
+        make: () -> CachedEffect?
+    ) -> CachedEffect? {
+        if let hit = effectCache[key] { return hit }
+        guard let effect = make() else { return nil }
+        if effectCacheOrder.count >= effectCacheLimit, let oldest = effectCacheOrder.first {
+            effectCache.removeValue(forKey: oldest)
+            effectCacheOrder.removeFirst()
+        }
+        effectCache[key] = effect
+        effectCacheOrder.append(key)
+        return effect
+    }
+
+    private static func effectKey(_ rect: CGRect, lineWidth: CGFloat, isBlur: Bool, source: RenderSource) -> EffectKey {
+        EffectKey(
+            imageID: ObjectIdentifier(source.image),
+            originX: source.originInImage.x,
+            originY: source.originInImage.y,
+            scale: source.pixelsPerPoint,
+            isBlur: isBlur,
+            rect: rect,
+            lineWidth: lineWidth
+        )
+    }
+
     /// Draws annotations into a context whose current coordinate system is top-left
     /// origin, y-down, and measured in points. The caller is responsible for the
     /// selection clip and for positioning origin at (0, 0).
@@ -228,6 +274,17 @@ public enum AnnotationRenderer {
 
     private static func drawMosaic(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource?, in context: CGContext) {
         guard let source, rect.width >= 1, rect.height >= 1 else { return }
+        let key = effectKey(rect, lineWidth: lineWidth, isBlur: false, source: source)
+        guard let effect = cachedEffect(key: key, make: { makeMosaicEffect(rect, lineWidth: lineWidth, source: source) })
+        else { return }
+        context.saveGState()
+        context.clip(to: rect)
+        context.interpolationQuality = .none
+        drawImageTopLeft(effect.image, in: effect.localRect, in: context)
+        context.restoreGState()
+    }
+
+    private static func makeMosaicEffect(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource) -> CachedEffect? {
         let scale = source.pixelsPerPoint
         let pixelRect = CGRect(
             x: source.originInImage.x + rect.minX * scale,
@@ -237,8 +294,8 @@ public enum AnnotationRenderer {
         ).integral
         let imageBounds = CGRect(x: 0, y: 0, width: source.image.width, height: source.image.height)
         let clipped = pixelRect.intersection(imageBounds)
-        guard !clipped.isNull, clipped.width >= 1, clipped.height >= 1 else { return }
-        guard let crop = source.image.cropping(to: clipped) else { return }
+        guard !clipped.isNull, clipped.width >= 1, clipped.height >= 1 else { return nil }
+        guard let crop = source.image.cropping(to: clipped) else { return nil }
 
         let blockPixels = max(3, Int((max(4, lineWidth * 1.2) * scale).rounded()))
         let smallWidth = max(1, Int(clipped.width) / blockPixels)
@@ -252,20 +309,26 @@ public enum AnnotationRenderer {
             bytesPerRow: 0,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return }
+        ) else { return nil }
         smallContext.interpolationQuality = .low
         smallContext.draw(crop, in: CGRect(x: 0, y: 0, width: smallWidth, height: smallHeight))
-        guard let smallImage = smallContext.makeImage() else { return }
-
-        context.saveGState()
-        context.clip(to: rect)
-        context.interpolationQuality = .none
-        drawImageTopLeft(smallImage, in: rect, in: context)
-        context.restoreGState()
+        guard let smallImage = smallContext.makeImage() else { return nil }
+        return CachedEffect(image: smallImage, localRect: rect)
     }
 
     private static func drawBlur(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource?, in context: CGContext) {
         guard let source, rect.width >= 1, rect.height >= 1 else { return }
+        let key = effectKey(rect, lineWidth: lineWidth, isBlur: true, source: source)
+        guard let effect = cachedEffect(key: key, make: { makeBlurEffect(rect, lineWidth: lineWidth, source: source) })
+        else { return }
+        context.saveGState()
+        context.clip(to: rect)
+        context.interpolationQuality = .high
+        drawImageTopLeft(effect.image, in: effect.localRect, in: context)
+        context.restoreGState()
+    }
+
+    private static func makeBlurEffect(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource) -> CachedEffect? {
         let scale = source.pixelsPerPoint
         let padPoints = max(8, lineWidth * 5)
         let expanded = rect.insetBy(dx: -padPoints, dy: -padPoints)
@@ -277,8 +340,8 @@ public enum AnnotationRenderer {
         ).integral
         let imageBounds = CGRect(x: 0, y: 0, width: source.image.width, height: source.image.height)
         let clipped = pixelRect.intersection(imageBounds)
-        guard !clipped.isNull, clipped.width >= 2, clipped.height >= 2 else { return }
-        guard let crop = source.image.cropping(to: clipped) else { return }
+        guard !clipped.isNull, clipped.width >= 2, clipped.height >= 2 else { return nil }
+        guard let crop = source.image.cropping(to: clipped) else { return nil }
 
         let ciImage = CIImage(cgImage: crop).clampedToExtent()
         let radius = max(4, lineWidth * 2 * scale)
@@ -286,25 +349,23 @@ public enum AnnotationRenderer {
             .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
             .cropped(to: CGRect(x: 0, y: 0, width: crop.width, height: crop.height)) as CIImage?,
             let blurred = ciContext.createCGImage(output, from: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
-        else { return }
+        else { return nil }
 
         let clippedLocal = Geometry.pointRect(for: clipped, scale: scale)
             .offsetBy(dx: -source.originInImage.x / scale, dy: -source.originInImage.y / scale)
-        context.saveGState()
-        context.clip(to: rect)
-        context.interpolationQuality = .high
-        drawImageTopLeft(blurred, in: clippedLocal, in: context)
-        context.restoreGState()
+        return CachedEffect(image: blurred, localRect: clippedLocal)
     }
 
     public static func averageColor(of image: CGImage, at point: CGPoint) -> RGBAColor? {
         let x = Int(point.x)
         let y = Int(point.y)
         guard x >= 0, y >= 0, x < image.width, y < image.height else { return nil }
-        var pixel = [UInt8](repeating: 0, count: 4)
+        // 高频取色请用 PixelSampler；这里先裁剪 1px，避免把整图 draw 进 1×1 上下文
+        guard let pixel = image.cropping(to: CGRect(x: x, y: y, width: 1, height: 1)) else { return nil }
+        var rgba = [UInt8](repeating: 0, count: 4)
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         guard let context = CGContext(
-            data: &pixel,
+            data: &rgba,
             width: 1,
             height: 1,
             bitsPerComponent: 8,
@@ -313,13 +374,17 @@ public enum AnnotationRenderer {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
         context.interpolationQuality = .none
-        context.translateBy(x: CGFloat(-x), y: CGFloat(y - image.height + 1))
-        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        context.draw(pixel, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        let alpha = Double(rgba[3]) / 255.0
+        let unpremultiply: (UInt8) -> Double = { component in
+            let value = Double(component) / 255.0
+            return alpha > 0 ? min(1, value / alpha) : value
+        }
         return RGBAColor(
-            red: Double(pixel[0]) / 255.0,
-            green: Double(pixel[1]) / 255.0,
-            blue: Double(pixel[2]) / 255.0,
-            alpha: Double(pixel[3]) / 255.0
+            red: unpremultiply(rgba[0]),
+            green: unpremultiply(rgba[1]),
+            blue: unpremultiply(rgba[2]),
+            alpha: alpha
         )
     }
 }

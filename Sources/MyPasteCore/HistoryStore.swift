@@ -3,7 +3,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-public struct HistoryEntry: Identifiable, Hashable {
+public struct HistoryEntry: Identifiable, Hashable, Sendable {
     public let id: String
     public let url: URL
     public let thumbnailURL: URL
@@ -30,9 +30,9 @@ public struct HistoryEntry: Identifiable, Hashable {
 
 public final class HistoryStore {
     public static let shared = HistoryStore()
-    public static let didChangeNotification = Notification.Name("com.mypaste.historyDidChange")
 
     public let rootURL: URL
+    // 所有文件读写都走同一串行队列，避免 record 与 delete/clear 竞争
     private let queue = DispatchQueue(label: "com.mypaste.history", qos: .utility)
 
     public init(rootURL: URL? = nil) {
@@ -46,33 +46,51 @@ public final class HistoryStore {
         try? FileManager.default.createDirectory(at: self.rootURL, withIntermediateDirectories: true)
     }
 
+    /// - Parameters:
+    ///   - pngData: 调用方已编码的 PNG，传入可复用编码结果；为 nil 时内部编码
+    ///   - onError: 写入失败回调（主线程），不要静默失败
     @discardableResult
-    public func record(_ image: CGImage, completion: ((HistoryEntry?) -> Void)? = nil) -> HistoryEntry? {
+    public func record(
+        _ image: CGImage,
+        pngData: Data? = nil,
+        completion: ((HistoryEntry?) -> Void)? = nil,
+        onError: ((Error) -> Void)? = nil
+    ) -> HistoryEntry? {
         let limit = AppSettings.shared.historyLimit
+        let diskLimit = AppSettings.shared.historyDiskLimitMB
         queue.async { [weak self] in
             guard let self else { return }
-            let entry = try? self.recordSync(image, limit: limit)
-            DispatchQueue.main.async {
-                completion?(entry)
-                NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+            do {
+                let entry = try self.recordSync(image, pngData: pngData, limit: limit, diskLimitMB: diskLimit)
+                DispatchQueue.main.async {
+                    completion?(entry)
+                    NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion?(nil)
+                    onError?(error)
+                }
             }
         }
         return nil
     }
 
     @discardableResult
-    public func recordSync(_ image: CGImage, limit: Int? = nil) throws -> HistoryEntry {
+    public func recordSync(
+        _ image: CGImage,
+        pngData: Data? = nil,
+        limit: Int? = nil,
+        diskLimitMB: Int? = nil
+    ) throws -> HistoryEntry {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
         let now = Date()
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
         let unique = UUID().uuidString.prefix(4)
-        let base = "MyPaste_\(formatter.string(from: now))_\(unique)"
+        let base = "\(ImageExporter.timestampBase(date: now))_\(unique)"
         let url = rootURL.appendingPathComponent(base + ".png")
         let thumbnailURL = rootURL.appendingPathComponent(base + "_thumb.png")
 
-        guard let png = ImageExporter.pngData(image) else {
+        guard let png = pngData ?? ImageExporter.pngData(image) else {
             throw ImageExporter.ExportError.encodingFailed
         }
         try png.write(to: url, options: .atomic)
@@ -90,12 +108,12 @@ public final class HistoryStore {
             pixelSize: CGSize(width: image.width, height: image.height),
             fileSize: Int64(png.count)
         )
-        try prune(limit: limit ?? AppSettings.shared.historyLimit)
+        try prune(limit: limit ?? AppSettings.shared.historyLimit, diskLimitMB: diskLimitMB)
         return entry
     }
 
     public func entries() -> [HistoryEntry] {
-        Self.listEntries(in: rootURL)
+        queue.sync { Self.listEntries(in: rootURL) }
     }
 
     public static func listEntries(in rootURL: URL) -> [HistoryEntry] {
@@ -128,27 +146,57 @@ public final class HistoryStore {
     }
 
     public func delete(_ entry: HistoryEntry) {
-        try? FileManager.default.removeItem(at: entry.url)
-        try? FileManager.default.removeItem(at: entry.thumbnailURL)
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        queue.async { [weak self] in
+            guard let self else { return }
+            try? FileManager.default.removeItem(at: entry.url)
+            try? FileManager.default.removeItem(at: entry.thumbnailURL)
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
+            }
+        }
     }
 
     public func clear() {
-        let fm = FileManager.default
-        if let urls = try? fm.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil) {
-            for url in urls where url.pathExtension.lowercased() == "png" {
-                try? fm.removeItem(at: url)
+        queue.async { [weak self] in
+            guard let self else { return }
+            let fm = FileManager.default
+            if let urls = try? fm.contentsOfDirectory(at: self.rootURL, includingPropertiesForKeys: nil) {
+                for url in urls where url.pathExtension.lowercased() == "png" {
+                    try? fm.removeItem(at: url)
+                }
+            }
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
             }
         }
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
-    public func prune(limit: Int) throws {
-        let all = Self.listEntries(in: rootURL)
-        guard all.count > limit else { return }
-        for entry in all.dropFirst(limit) {
-            try? FileManager.default.removeItem(at: entry.url)
-            try? FileManager.default.removeItem(at: entry.thumbnailURL)
+    /// 按条数与磁盘字节双重上限清理，从最旧开始删除，至少保留最新一条
+    public func prune(limit: Int, diskLimitMB: Int? = nil) throws {
+        try prune(limit: limit, diskLimitBytes: diskLimitMB.map { Int64($0) * 1024 * 1024 })
+    }
+
+    public func prune(limit: Int, diskLimitBytes: Int64?) throws {
+        var kept = Self.listEntries(in: rootURL)
+        var total = kept.reduce(Int64(0)) { $0 + $1.fileSize }
+        while kept.count > 1,
+              kept.count > limit || (diskLimitBytes.map { total > $0 } ?? false) {
+            let removed = kept.removeLast()
+            total -= removed.fileSize
+            try? FileManager.default.removeItem(at: removed.url)
+            try? FileManager.default.removeItem(at: removed.thumbnailURL)
+        }
+    }
+
+    /// 外部调用的清理入口（设置变更时），走内部队列并在完成后发通知
+    public func pruneAsync(limit: Int, diskLimitMB: Int? = nil) {
+        let disk = diskLimitMB ?? AppSettings.shared.historyDiskLimitMB
+        queue.async { [weak self] in
+            guard let self else { return }
+            try? self.prune(limit: limit, diskLimitMB: disk)
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
+            }
         }
     }
 

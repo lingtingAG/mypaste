@@ -13,6 +13,7 @@ public final class AppSettings {
             prefix + "showMagnifier": true,
             prefix + "autoSave": false,
             prefix + "historyLimit": 50,
+            prefix + "historyDiskLimitMB": 500,
             prefix + "toolLineWidth": 4.0,
             prefix + "toolFontSize": 20.0,
             prefix + "toolFilled": false,
@@ -55,6 +56,11 @@ public final class AppSettings {
         set { set(max(10, newValue), key: "historyLimit") }
     }
 
+    public var historyDiskLimitMB: Int {
+        get { max(100, defaults.integer(forKey: prefix + "historyDiskLimitMB")) }
+        set { set(max(100, newValue), key: "historyDiskLimitMB") }
+    }
+
     public var toolLineWidth: CGFloat {
         get {
             let value = defaults.double(forKey: prefix + "toolLineWidth")
@@ -66,9 +72,9 @@ public final class AppSettings {
     public var toolFontSize: CGFloat {
         get {
             let value = defaults.double(forKey: prefix + "toolFontSize")
-            return value > 0 ? min(120, max(10, CGFloat(value))) : 20
+            return value > 0 ? TextMetrics.clampedFontSize(CGFloat(value)) : 20
         }
-        set { set(Double(min(120, max(10, newValue))), key: "toolFontSize") }
+        set { set(Double(TextMetrics.clampedFontSize(newValue)), key: "toolFontSize") }
     }
 
     public var toolFilled: Bool {
