@@ -422,11 +422,10 @@ private final class PinContentView: NSView {
 
     @objc private func zoomPercent(_ sender: NSMenuItem) {
         guard let window, let controller else { return }
-        let factor = CGFloat(sender.tag) / 100
-        let size = CGSize(
-            width: controller.initialDisplaySize.width * factor,
-            height: controller.initialDisplaySize.height * factor
-        )
+        let initial = controller.initialDisplaySize
+        // 与拖拽/滚轮路径一致，百分比缩放同样受宽度上限约束
+        let factor = min(CGFloat(sender.tag) / 100, pinMaxWidth / max(1, initial.width))
+        let size = CGSize(width: initial.width * factor, height: initial.height * factor)
         var frame = CGRect(origin: window.frame.origin, size: size)
         frame.origin.y = window.frame.maxY - size.height
         window.setFrame(frame, display: true)

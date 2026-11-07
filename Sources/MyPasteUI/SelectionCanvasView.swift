@@ -29,7 +29,7 @@ private enum CanvasDragState {
 
 private struct AnnotationCache {
     let image: CGImage
-    let selectionSize: CGSize
+    let selection: CGRect
     let annotations: [Annotation]
 }
 
@@ -1310,20 +1310,9 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         // 已提交标注缓存为位图层，鼠标移动/画笔拖动时不再全量重渲染；
         // 缓存仍由 AnnotationRenderer 生成，保证与导出一致
         let localRect = CGRect(origin: .zero, size: selection.size)
-        if let cache = annotationCache,
-           cache.selectionSize == selection.size,
-           cache.annotations == visibleAnnotations {
-            AnnotationRenderer.drawImageTopLeft(cache.image, in: localRect, in: context)
-        } else if !visibleAnnotations.isEmpty,
-                  let image = renderAnnotationCache(visibleAnnotations, size: selection.size, source: source) {
-            annotationCache = AnnotationCache(
-                image: image,
-                selectionSize: selection.size,
-                annotations: visibleAnnotations
-            )
-            AnnotationRenderer.drawImageTopLeft(image, in: localRect, in: context)
+        if let layer = committedAnnotationLayer(for: selection, visibleAnnotations: visibleAnnotations) {
+            AnnotationRenderer.drawImageTopLeft(layer, in: localRect, in: context)
         } else {
-            annotationCache = nil
             AnnotationRenderer.draw(
                 annotations: visibleAnnotations,
                 in: context,
@@ -1341,14 +1330,41 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         context.restoreGState()
     }
 
+    // 缓存键必须覆盖渲染结果依赖的全部输入：完整选区（马赛克/模糊按 origin 采样底图，
+    // 仅尺寸不变也会改变结果）与标注集合；captured 的图像和 scale 在画布生命周期内不变
+    func committedAnnotationLayer(for selection: CGRect, visibleAnnotations: [Annotation]) -> CGImage? {
+        if let cache = annotationCache,
+           cache.selection == selection,
+           cache.annotations == visibleAnnotations {
+            return cache.image
+        }
+        guard !visibleAnnotations.isEmpty else {
+            annotationCache = nil
+            return nil
+        }
+        let source = RenderSource(
+            image: captured.image,
+            originInImage: CGPoint(x: selection.minX * captured.scale, y: selection.minY * captured.scale),
+            pixelsPerPoint: captured.scale
+        )
+        guard let image = renderAnnotationCache(visibleAnnotations, selection: selection, source: source) else {
+            annotationCache = nil
+            return nil
+        }
+        annotationCache = AnnotationCache(image: image, selection: selection, annotations: visibleAnnotations)
+        return image
+    }
+
     func renderAnnotationCache(
         _ annotations: [Annotation],
-        size: CGSize,
+        selection: CGRect,
         source: RenderSource
     ) -> CGImage? {
         let scale = captured.scale
-        let width = max(1, Int((size.width * scale).rounded()))
-        let height = max(1, Int((size.height * scale).rounded()))
+        // 与导出裁剪（Geometry.pixelRect）逐边舍入一致，避免分数坐标/非整数 scale 下差 1px
+        let pixelSize = Geometry.pixelRect(for: selection, scale: scale)
+        let width = max(1, Int(pixelSize.width))
+        let height = max(1, Int(pixelSize.height))
         let colorSpace = captured.image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         guard let context = CGContext(
             data: nil,
@@ -1363,7 +1379,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         context.translateBy(x: 0, y: CGFloat(height))
         context.scaleBy(x: 1, y: -1)
         context.scaleBy(x: scale, y: scale)
-        AnnotationRenderer.draw(annotations: annotations, in: context, selectionSize: size, source: source)
+        AnnotationRenderer.draw(annotations: annotations, in: context, selectionSize: selection.size, source: source)
         return context.makeImage()
     }
 

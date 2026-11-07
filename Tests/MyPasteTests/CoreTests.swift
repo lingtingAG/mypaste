@@ -276,6 +276,21 @@ final class CoreTests: XCTestCase {
         XCTAssertLessThan(blurCenter.red, 0.2)
     }
 
+    func testComposeFractionalScaleMatchesPixelRect() throws {
+        let image = try makeTestImage(width: 600, height: 400)
+        let selection = CGRect(x: 10.3, y: 20.7, width: 100.2, height: 50.5)
+        let composed = try XCTUnwrap(ImageComposer.compose(
+            baseImage: image,
+            selectionRect: selection,
+            screenScale: 1.5,
+            annotations: []
+        ))
+        let expected = Geometry.pixelRect(for: selection, scale: 1.5)
+        XCTAssertEqual(composed.width, Int(expected.width))
+        XCTAssertEqual(composed.height, Int(expected.height))
+        XCTAssertEqual(composed.width, 151)
+    }
+
     func testAnnotationHitTesting() {
         let annotation = Annotation(kind: .rectangle(CGRect(x: 10, y: 10, width: 100, height: 50)))
         XCTAssertTrue(annotation.hitTest(CGPoint(x: 60, y: 30)))

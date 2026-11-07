@@ -369,7 +369,7 @@ final class CanvasInteractionTests: XCTestCase {
         )
         let cacheImage = try XCTUnwrap(canvas.renderAnnotationCache(
             canvas.annotations,
-            size: selection.size,
+            selection: selection,
             source: source
         ))
         let composed = try XCTUnwrap(ImageComposer.compose(
@@ -391,6 +391,81 @@ final class CanvasInteractionTests: XCTestCase {
         XCTAssertEqual(composedColor.red, cacheColor.red, accuracy: 0.02)
         XCTAssertEqual(composedColor.green, cacheColor.green, accuracy: 0.02)
         XCTAssertEqual(composedColor.blue, cacheColor.blue, accuracy: 0.02)
+    }
+
+    func testMovingSelectionResamplesMosaicCache() throws {
+        // 底图左半红、右半蓝（像素坐标），马赛克效果依赖选区 origin 采样
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: 1600,
+            height: 1200,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(NSColor.red.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: 800, height: 1200))
+        context.setFillColor(NSColor.blue.cgColor)
+        context.fill(CGRect(x: 800, y: 0, width: 800, height: 1200))
+        let splitImage = try XCTUnwrap(context.makeImage())
+        captured = CapturedScreen(screen: NSScreen.main ?? NSScreen.screens[0], image: splitImage, scale: 2)
+        canvas = SelectionCanvasView(captured: captured, mode: .edit)
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        window.contentView = canvas
+
+        let mosaic = Annotation(kind: .mosaic(CGRect(x: 0, y: 0, width: 200, height: 200)), color: .red, lineWidth: 4)
+        let redSelection = CGRect(x: 100, y: 100, width: 200, height: 200)
+        canvas.configureForSnapshot(
+            selection: redSelection,
+            annotations: [mosaic],
+            tool: .move,
+            color: .red,
+            lineWidth: 4,
+            filled: false,
+            withToolbar: false
+        )
+        let samplePoint = CGPoint(x: 200, y: 200)
+        let first = try XCTUnwrap(canvas.committedAnnotationLayer(for: redSelection, visibleAnnotations: canvas.annotations))
+        let firstColor = try XCTUnwrap(PixelSampler(image: first).color(at: samplePoint))
+        XCTAssertGreaterThan(firstColor.red, 0.8)
+        XCTAssertLessThan(firstColor.blue, 0.2)
+
+        // 尺寸与标注集合不变，仅移动选区到蓝色区域：缓存必须按新 origin 重采样
+        drag(from: CGPoint(x: 200, y: 200), to: CGPoint(x: 600, y: 200))
+        let blueSelection = CGRect(x: 500, y: 100, width: 200, height: 200)
+        XCTAssertEqual(canvas.selection, blueSelection)
+        let second = try XCTUnwrap(canvas.committedAnnotationLayer(for: blueSelection, visibleAnnotations: canvas.annotations))
+        let secondColor = try XCTUnwrap(PixelSampler(image: second).color(at: samplePoint))
+        XCTAssertGreaterThan(secondColor.blue, 0.8)
+        XCTAssertLessThan(secondColor.red, 0.2)
+    }
+
+    func testAnnotationCachePixelSizeMatchesExportRounding() throws {
+        // 分数坐标 + 非整数 scale：缓存位图尺寸必须与导出裁剪的逐边舍入一致
+        // scale 1.5 时 round(width*scale)=150 而逐边舍入=151，可区分两种策略
+        let image = Self.makeImage(width: 1200, height: 900)
+        captured = CapturedScreen(screen: NSScreen.main ?? NSScreen.screens[0], image: image, scale: 1.5)
+        canvas = SelectionCanvasView(captured: captured, mode: .edit)
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        window.contentView = canvas
+
+        let selection = CGRect(x: 10.3, y: 20.7, width: 100.2, height: 50.5)
+        let annotation = Annotation(kind: .rectangle(CGRect(x: 5, y: 5, width: 40, height: 20)), color: .red)
+        canvas.configureForSnapshot(
+            selection: selection,
+            annotations: [annotation],
+            tool: .move,
+            color: .red,
+            lineWidth: 4,
+            filled: false,
+            withToolbar: false
+        )
+        let layer = try XCTUnwrap(canvas.committedAnnotationLayer(for: selection, visibleAnnotations: canvas.annotations))
+        let expected = Geometry.pixelRect(for: selection, scale: 1.5)
+        XCTAssertEqual(layer.width, Int(expected.width))
+        XCTAssertEqual(layer.height, Int(expected.height))
+        XCTAssertEqual(layer.width, 151)
     }
 
     // MARK: - Event helpers
