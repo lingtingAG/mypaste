@@ -35,6 +35,14 @@ final class CanvasInteractionTests: XCTestCase {
         super.tearDown()
     }
 
+    func testMenuBarIconIsTemplateAndCorrectSize() {
+        let image = MenuBarIcon.image()
+        XCTAssertTrue(image.isTemplate)
+        XCTAssertEqual(image.size.width, 18, accuracy: 0.01)
+        XCTAssertEqual(image.size.height, 18, accuracy: 0.01)
+        XCTAssertNotNil(image.tiffRepresentation)
+    }
+
     func testDragCreatesSelectionAndShowsToolbar() {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 400, y: 300))
         XCTAssertEqual(canvas.selection, CGRect(x: 100, y: 100, width: 300, height: 200))

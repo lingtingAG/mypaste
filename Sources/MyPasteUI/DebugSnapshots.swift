@@ -151,6 +151,7 @@ public enum DebugSnapshots {
         try renderPinPreview(desktop: desktop, directory: directory, outputs: &outputs)
         try renderPreferences(directory: directory, outputs: &outputs)
         try renderHistory(desktop: desktop, directory: directory, outputs: &outputs)
+        try renderMenuBarIcon(directory: directory, outputs: &outputs)
 
         return outputs
     }
@@ -267,6 +268,99 @@ public enum DebugSnapshots {
         let controller = HistoryWindowController(store: store, pinBoard: PinBoard())
         guard let view = controller.makeSnapshotContentView(), let image = cache(view: view) else { return }
         try write(image, name: "09-history.png", to: directory, outputs: &outputs)
+    }
+
+    @MainActor
+    private static func renderMenuBarIcon(directory: URL, outputs: inout [URL]) throws {
+        let canvasSize = CGSize(width: 620, height: 330)
+        let menuImage = MenuBarIcon.image()
+        guard let image = OffscreenRenderer.render(size: canvasSize, scale: 2, draw: { context in
+            NSColor(calibratedWhite: 0.95, alpha: 1).setFill()
+            CGRect(origin: .zero, size: canvasSize).fill()
+
+            let card = CGRect(x: 30, y: 45, width: 250, height: 250)
+            NSColor.white.setFill()
+            NSBezierPath(roundedRect: card, xRadius: 18, yRadius: 18).fill()
+
+            context.saveGState()
+            context.translateBy(x: card.midX - 72, y: card.midY - 74)
+            context.scaleBy(x: 8, y: 8)
+            MenuBarIcon.draw(in: context)
+            context.restoreGState()
+
+            drawText(
+                "18 × 18 pt template",
+                at: CGPoint(x: card.minX + 17, y: card.maxY - 27),
+                font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                color: NSColor(calibratedWhite: 0.55, alpha: 1)
+            )
+            drawText(
+                "菜单栏图标",
+                at: CGPoint(x: card.minX, y: card.minY - 24),
+                font: NSFont.systemFont(ofSize: 15, weight: .semibold),
+                color: NSColor(calibratedWhite: 0.16, alpha: 1)
+            )
+
+            let bars: [(CGRect, NSColor, NSColor, String)] = [
+                (
+                    CGRect(x: 318, y: 68, width: 272, height: 30),
+                    NSColor(calibratedWhite: 0.99, alpha: 1),
+                    NSColor(calibratedWhite: 0.12, alpha: 1),
+                    "浅色菜单栏"
+                ),
+                (
+                    CGRect(x: 318, y: 134, width: 272, height: 30),
+                    NSColor(calibratedRed: 0.48, green: 0.67, blue: 0.89, alpha: 1),
+                    NSColor(calibratedWhite: 0.22, alpha: 1),
+                    "高亮菜单栏"
+                ),
+            ]
+
+            for (rect, fill, textColor, label) in bars {
+                NSColor.black.withAlphaComponent(0.05).setFill()
+                NSBezierPath(roundedRect: rect.offsetBy(dx: 0, dy: 2), xRadius: 8, yRadius: 8).fill()
+                fill.setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
+                NSColor.black.withAlphaComponent(0.08).setStroke()
+                let border = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+                border.lineWidth = 1
+                border.stroke()
+
+                menuImage.draw(in: CGRect(
+                    x: rect.minX + 21,
+                    y: rect.minY + 6,
+                    width: MenuBarIcon.size.width,
+                    height: MenuBarIcon.size.height
+                ))
+
+                drawText(
+                    "10:09  Sun Oct 25",
+                    at: CGPoint(x: rect.maxX - 117, y: rect.minY + 8),
+                    font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+                    color: textColor
+                )
+                drawText(
+                    label,
+                    at: CGPoint(x: rect.minX, y: rect.maxY + 8),
+                    font: NSFont.systemFont(ofSize: 10.5, weight: .regular),
+                    color: NSColor(calibratedWhite: 0.45, alpha: 1)
+                )
+            }
+
+            drawText(
+                "模板图标会自动适配浅色、深色和高亮菜单栏",
+                at: CGPoint(x: 318, y: 252),
+                font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                color: NSColor(calibratedWhite: 0.42, alpha: 1)
+            )
+            drawText(
+                "四角截图框配中心对焦点，圆角线条在菜单栏中保持清晰",
+                at: CGPoint(x: 318, y: 274),
+                font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                color: NSColor(calibratedWhite: 0.42, alpha: 1)
+            )
+        }) else { return }
+        try write(image, name: "11-menubar-icon.png", to: directory, outputs: &outputs)
     }
 
     // MARK: - Rendering helpers

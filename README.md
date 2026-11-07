@@ -160,8 +160,8 @@ swift test
 swift run MyPasteSnapshots docs/snapshots
 ```
 
-- `swift test`：21 个核心测试 + 11 个画布交互测试，共 32 个，全部通过。
-- `swift run MyPasteSnapshots docs/snapshots`：离屏渲染 10 张 UI 预览与 1 张合成结果，不弹出窗口，也不需要屏幕录制权限。
+- `swift test`：21 个核心测试 + 12 个画布交互测试，共 33 个，全部通过。
+- `swift run MyPasteSnapshots docs/snapshots`：离屏渲染 11 张 UI 预览与 1 张合成结果，不弹出窗口，也不需要屏幕录制权限。
 - 调试时也可通过 URL 动作：
 
 ```bash
@@ -183,7 +183,8 @@ open 'mypaste://quit'
 - 历史记录写入、缩略图、上限裁剪、删除。
 - 颜色 / 文本贴图卡片渲染与颜色解析。
 - 画布交互：拖拽选区、点选全屏、矩形标注、序号、橡皮擦、文字提交、输入框拖动、字号调整、文字对象移动与再次编辑、撤销 / 重做、选区缩放、导出合成。
-- 离屏 UI 快照：悬浮放大镜、编辑器与完整工具栏、文字输入框与字号菜单、取色器、贴图、历史、设置、文本 / 颜色卡片。
+- 菜单栏模板图标：18×18 pt、单色自适应、浅色 / 高亮菜单栏渲染正常。
+- 离屏 UI 快照：悬浮放大镜、编辑器与完整工具栏、文字输入框与字号菜单、取色器、贴图、历史、设置、文本 / 颜色卡片、菜单栏图标。
 - 运行进程验证：菜单栏进程启动、空闲 CPU 0%、贴图窗口（图片 / 文本）、设置 / 历史窗口、全局快捷键注册成功、URL 动作。
 
 已完成端到端验证：
@@ -245,6 +246,7 @@ Sources/
 │   ├── SelectionCanvasView.swift# 选区、放大镜、窗口检测、标注与文字对象交互
 │   ├── TextEditingBox.swift     # 可拖动文字输入框、字号与内联编辑
 │   ├── EditorToolbarView.swift  # 自绘工具栏、字号菜单
+│   ├── MenuBarIcon.swift        # 菜单栏截图取景框模板图标
 │   ├── WindowDetector.swift     # CGWindowList 窗口命中
 │   ├── PinWindowController.swift# 贴图窗口、缩放、右键菜单
 │   ├── PinBoard.swift
@@ -284,6 +286,7 @@ Resources/
 | --- | --- |
 | ![窗口检测与放大镜](docs/snapshots/01-overlay-hover.png) | ![取色器](docs/snapshots/03-overlay-colorpicker.png) |
 | ![文字输入与字号调整](docs/snapshots/10-text-editor.png) | ![导出合成](docs/snapshots/04-composition.png) |
+| ![菜单栏模板图标](docs/snapshots/11-menubar-icon.png) | ![颜色贴图](docs/snapshots/06-card-color.png) |
 | ![贴图窗口](docs/snapshots/07-pin.png) | ![历史记录](docs/snapshots/09-history.png) |
 | ![设置](docs/snapshots/08-preferences.png) | ![文本贴图](docs/snapshots/05-card-text.png) |
 

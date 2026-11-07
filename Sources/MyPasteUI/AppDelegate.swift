@@ -145,11 +145,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-            let image = NSImage(systemSymbolName: "viewfinder", accessibilityDescription: "MyPaste")
-                ?? NSImage(systemSymbolName: "camera", accessibilityDescription: "MyPaste")
-            button.image = image?.withSymbolConfiguration(configuration)
-            button.image?.isTemplate = true
+            button.image = MenuBarIcon.image()
+            button.imagePosition = .imageOnly
+            button.setAccessibilityLabel("MyPaste")
             button.toolTip = "MyPaste · \(settings.captureShortcut.displayString) 截图 · \(settings.pinShortcut.displayString) 贴图"
         }
         let menu = NSMenu()
