@@ -559,7 +559,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         selectedIndex = nil
         refreshButtons()
         // 删除在 store 队列异步执行，完成后由 didChange 通知触发 reload
-        store.delete(entry)
+        store.delete(entry, onError: { [weak self] error in self?.presentHistoryError(error) })
     }
 
     @objc private func clearHistory() {
@@ -575,7 +575,20 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
             self?.selectedIndex = nil
             self?.thumbnails.removeAll()
             self?.thumbnailOrder.removeAll()
-            self?.store.clear()
+            self?.store.clear(onError: { [weak self] error in self?.presentHistoryError(error) })
+        }
+    }
+
+    private func presentHistoryError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "历史记录操作失败"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
         }
     }
 

@@ -65,6 +65,8 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         didSet { annotationCache = nil }
     }
     private var annotationCache: AnnotationCache?
+    // 会话级效果缓存：生命周期与画布/源图一致，避免跨会话串用与跨线程共享
+    private let effectCache = AnnotationEffectCache()
     private lazy var pixelSampler = PixelSampler(image: captured.image)
     private var undoStack: [[Annotation]] = []
     private var redoStack: [[Annotation]] = []
@@ -1317,14 +1319,16 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
                 annotations: visibleAnnotations,
                 in: context,
                 selectionSize: selection.size,
-                source: source
+                source: source,
+                effectCache: effectCache
             )
         }
         if let currentAnnotation {
             AnnotationRenderer.draw(
                 annotation: currentAnnotation,
                 in: context,
-                source: source
+                source: source,
+                effectCache: effectCache
             )
         }
         context.restoreGState()
@@ -1379,7 +1383,13 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         context.translateBy(x: 0, y: CGFloat(height))
         context.scaleBy(x: 1, y: -1)
         context.scaleBy(x: scale, y: scale)
-        AnnotationRenderer.draw(annotations: annotations, in: context, selectionSize: selection.size, source: source)
+        AnnotationRenderer.draw(
+            annotations: annotations,
+            in: context,
+            selectionSize: selection.size,
+            source: source,
+            effectCache: effectCache
+        )
         return context.makeImage()
     }
 

@@ -365,10 +365,12 @@ final class CoreTests: XCTestCase {
         for _ in 0..<4 {
             entries.append(try store.recordSync(image, limit: 100))
         }
-        let fileSize = entries[0].fileSize
-        XCTAssertGreaterThan(fileSize, 0)
-        // 预算只够 2 个文件：从最旧删除，保留最新两条
-        try store.prune(limit: 100, diskLimitBytes: fileSize * 2)
+        let footprint = entries[0].diskFootprint
+        XCTAssertGreaterThan(entries[0].fileSize, 0)
+        XCTAssertGreaterThan(entries[0].thumbnailFileSize, 0)
+        XCTAssertEqual(footprint, entries[0].fileSize + entries[0].thumbnailFileSize)
+        // 预算只够 2 个文件（含缩略图）：从最旧删除，保留最新两条
+        try store.prune(limit: 100, diskLimitBytes: footprint * 2)
         let remaining = store.entries()
         XCTAssertEqual(remaining.count, 2)
         XCTAssertEqual(Set(remaining.map(\.id)), Set(entries.suffix(2).map(\.id)))
@@ -377,6 +379,76 @@ final class CoreTests: XCTestCase {
         try store.prune(limit: 100, diskLimitBytes: 1)
         XCTAssertEqual(store.entries().count, 1)
         XCTAssertEqual(store.entries()[0].id, entries.last?.id)
+    }
+
+    func testHistoryDeleteTreatsMissingFilesAsSuccess() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+        let entry = try store.recordSync(image, limit: 10)
+        try FileManager.default.removeItem(at: entry.url)
+        try FileManager.default.removeItem(at: entry.thumbnailURL)
+
+        let changed = expectation(description: "history change")
+        let observer = NotificationCenter.default.addObserver(forName: .myPasteHistoryDidChange, object: store, queue: .main) { _ in
+            changed.fulfill()
+        }
+        store.delete(entry, onError: { error in XCTFail("missing file should not report error: \(error)") })
+        wait(for: [changed], timeout: 5)
+        NotificationCenter.default.removeObserver(observer)
+        XCTAssertTrue(store.entries().isEmpty)
+    }
+
+    func testHistoryClearReportsIOError() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+        _ = try store.recordSync(image, limit: 10)
+        // 把历史目录替换为普通文件：contentsOfDirectory 必然失败且非"文件不存在"
+        try FileManager.default.removeItem(at: root)
+        FileManager.default.createFile(atPath: root.path, contents: Data([0]))
+
+        let failed = expectation(description: "clear error reported")
+        store.clear(onError: { _ in failed.fulfill() })
+        wait(for: [failed], timeout: 5)
+    }
+
+    // MARK: - Effect cache
+
+    func testEffectCacheHitIdentityAndEviction() throws {
+        let image = try makeTestImage(width: 40, height: 30)
+        let other = try makeTestImage(width: 40, height: 30)
+        let cache = AnnotationEffectCache(limit: 2)
+        let effect = AnnotationEffectCache.Effect(image: image, localRect: .zero)
+        let rect = CGRect(x: 0, y: 0, width: 10, height: 10)
+        func key(_ img: CGImage, _ r: CGRect) -> AnnotationEffectCache.Key {
+            AnnotationEffectCache.Key(image: img, origin: .zero, scale: 2, isBlur: false, rect: r, lineWidth: 4)
+        }
+        var makes = 0
+        let make = { () -> AnnotationEffectCache.Effect? in makes += 1; return effect }
+
+        XCTAssertNotNil(cache.effect(for: key(image, rect), make: make))
+        XCTAssertNotNil(cache.effect(for: key(image, rect), make: make))
+        XCTAssertEqual(makes, 1, "same key must hit cache")
+
+        // 几何参数相同但源图不同：不得串用（键含图像身份）
+        XCTAssertNotNil(cache.effect(for: key(other, rect), make: make))
+        XCTAssertEqual(makes, 2)
+
+        // 超出上限驱逐最旧：首个 key 再取需重算
+        XCTAssertNotNil(cache.effect(for: key(image, rect.offsetBy(dx: 5, dy: 0)), make: make))
+        XCTAssertEqual(makes, 3)
+        XCTAssertNotNil(cache.effect(for: key(image, rect), make: make))
+        XCTAssertEqual(makes, 4)
+
+        // 独立实例之间互不共享
+        let fresh = AnnotationEffectCache()
+        XCTAssertNotNil(fresh.effect(for: key(image, rect), make: make))
+        XCTAssertEqual(makes, 5)
     }
 
     func testHistoryRecordReusesProvidedPNGData() throws {

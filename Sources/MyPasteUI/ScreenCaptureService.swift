@@ -2,6 +2,17 @@ import AppKit
 import CoreGraphics
 import ScreenCaptureKit
 
+public struct ScreenCaptureBatch {
+    public let screens: [CapturedScreen]
+    /// 未能匹配到 SCDisplay 的屏幕数；大于 0 时调用方必须提示用户覆盖不完整
+    public let unmappedScreenCount: Int
+
+    public init(screens: [CapturedScreen], unmappedScreenCount: Int) {
+        self.screens = screens
+        self.unmappedScreenCount = unmappedScreenCount
+    }
+}
+
 public struct CapturedScreen {
     public let screen: NSScreen
     public let image: CGImage
@@ -55,17 +66,21 @@ public final class ScreenCaptureService {
         CGRequestScreenCaptureAccess()
     }
 
-    public func captureAllScreens() async throws -> [CapturedScreen] {
+    public func captureAllScreens() async throws -> ScreenCaptureBatch {
         guard hasPermission else { throw ScreenCaptureError.permissionDenied }
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let screens = NSScreen.screens
         // 并行冻结各屏，缩多多屏冻结时刻差
         var captured = [CapturedScreen?](repeating: nil, count: screens.count)
+        var unmapped = 0
         try await withThrowingTaskGroup(of: (Int, CapturedScreen).self) { group in
             for (index, screen) in screens.enumerated() {
                 guard let displayID = screen.mpDisplayID,
-                      let display = content.displays.first(where: { $0.displayID == displayID }) else { continue }
+                      let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                    unmapped += 1
+                    continue
+                }
                 group.addTask {
                     let image = try await Self.captureImage(display: display, screen: screen)
                     let scale = CapturedScreen.effectiveScale(
@@ -82,8 +97,11 @@ public final class ScreenCaptureService {
         }
 
         let result = captured.compactMap { $0 }
-        guard !result.isEmpty else { throw ScreenCaptureError.noDisplays }
-        return result
+        // 映射失败不再静默：全部失败报 displayNotFound，部分失败由调用方提示用户
+        guard !result.isEmpty else {
+            throw unmapped > 0 ? ScreenCaptureError.displayNotFound : ScreenCaptureError.noDisplays
+        }
+        return ScreenCaptureBatch(screens: result, unmappedScreenCount: unmapped)
     }
 
     /// 只抓目标点所在的屏幕，用于全屏截图等单屏场景，避免抓全部显示器

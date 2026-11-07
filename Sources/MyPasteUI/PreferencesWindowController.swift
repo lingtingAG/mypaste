@@ -424,14 +424,27 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         let limit = sender.selectedTag()
         guard limit > 0 else { return }
         settings.historyLimit = limit
-        HistoryStore.shared.pruneAsync(limit: limit)
+        HistoryStore.shared.pruneAsync(limit: limit, onError: { [weak self] error in self?.presentPruneError(error) })
     }
 
     @objc private func historyDiskLimitChanged(_ sender: NSPopUpButton) {
         let limit = sender.selectedTag()
         guard limit > 0 else { return }
         settings.historyDiskLimitMB = limit
-        HistoryStore.shared.pruneAsync(limit: settings.historyLimit, diskLimitMB: limit)
+        HistoryStore.shared.pruneAsync(limit: settings.historyLimit, diskLimitMB: limit, onError: { [weak self] error in self?.presentPruneError(error) })
+    }
+
+    private func presentPruneError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "清理历史记录失败"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 
     @objc private func chooseFolder() {

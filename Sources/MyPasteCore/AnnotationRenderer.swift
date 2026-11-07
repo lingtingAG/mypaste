@@ -15,12 +15,11 @@ public struct RenderSource {
     }
 }
 
-public enum AnnotationRenderer {
-    private static let ciContext = CIContext()
-
-    // 马赛克/模糊效果图缓存：拖动预览时同一 rect 每帧重算代价高，
-    // 按图像 + 区域 + 线宽缓存，rect 变化才失效。仅主线程渲染路径使用。
-    private struct EffectKey: Hashable {
+/// 马赛克/模糊效果图缓存：拖动预览时同一 rect 每帧重算代价高，按图像 + 区域 + 线宽缓存。
+/// 会话级实例（由画布持有，生命周期与源图一致），避免全局静态缓存的跨会话地址复用串用
+/// 与跨线程共享问题。限定单渲染线程使用，非线程安全。
+public final class AnnotationEffectCache {
+    public struct Key: Hashable {
         let imageID: ObjectIdentifier
         let originX: CGFloat
         let originY: CGFloat
@@ -28,61 +27,78 @@ public enum AnnotationRenderer {
         let isBlur: Bool
         let rect: CGRect
         let lineWidth: CGFloat
-    }
-    private struct CachedEffect {
-        let image: CGImage
-        let localRect: CGRect
-    }
-    private static var effectCache: [EffectKey: CachedEffect] = [:]
-    private static var effectCacheOrder: [EffectKey] = []
-    private static let effectCacheLimit = 12
 
-    private static func cachedEffect(
-        key: EffectKey,
-        make: () -> CachedEffect?
-    ) -> CachedEffect? {
-        if let hit = effectCache[key] { return hit }
-        guard let effect = make() else { return nil }
-        if effectCacheOrder.count >= effectCacheLimit, let oldest = effectCacheOrder.first {
-            effectCache.removeValue(forKey: oldest)
-            effectCacheOrder.removeFirst()
+        public init(image: CGImage, origin: CGPoint, scale: CGFloat, isBlur: Bool, rect: CGRect, lineWidth: CGFloat) {
+            self.imageID = ObjectIdentifier(image)
+            self.originX = origin.x
+            self.originY = origin.y
+            self.scale = scale
+            self.isBlur = isBlur
+            self.rect = rect
+            self.lineWidth = lineWidth
         }
-        effectCache[key] = effect
-        effectCacheOrder.append(key)
+    }
+
+    public struct Effect {
+        public let image: CGImage
+        public let localRect: CGRect
+
+        public init(image: CGImage, localRect: CGRect) {
+            self.image = image
+            self.localRect = localRect
+        }
+    }
+
+    private var storage: [Key: Effect] = [:]
+    private var order: [Key] = []
+    private let limit: Int
+
+    public init(limit: Int = 12) {
+        self.limit = max(1, limit)
+    }
+
+    public func effect(for key: Key, make: () -> Effect?) -> Effect? {
+        if let hit = storage[key] { return hit }
+        guard let effect = make() else { return nil }
+        if order.count >= limit, let oldest = order.first {
+            storage.removeValue(forKey: oldest)
+            order.removeFirst()
+        }
+        storage[key] = effect
+        order.append(key)
         return effect
     }
+}
 
-    private static func effectKey(_ rect: CGRect, lineWidth: CGFloat, isBlur: Bool, source: RenderSource) -> EffectKey {
-        EffectKey(
-            imageID: ObjectIdentifier(source.image),
-            originX: source.originInImage.x,
-            originY: source.originInImage.y,
-            scale: source.pixelsPerPoint,
-            isBlur: isBlur,
-            rect: rect,
-            lineWidth: lineWidth
-        )
-    }
+public enum AnnotationRenderer {
+    private static let ciContext = CIContext()
 
     /// Draws annotations into a context whose current coordinate system is top-left
     /// origin, y-down, and measured in points. The caller is responsible for the
     /// selection clip and for positioning origin at (0, 0).
+    /// - Parameter effectCache: 会话级效果缓存；导出等一次性渲染传 nil（不缓存）
     public static func draw(
         annotations: [Annotation],
         in context: CGContext,
         selectionSize: CGSize,
-        source: RenderSource?
+        source: RenderSource?,
+        effectCache: AnnotationEffectCache? = nil
     ) {
         guard !annotations.isEmpty else { return }
         context.saveGState()
         context.clip(to: CGRect(origin: .zero, size: selectionSize))
         for annotation in annotations {
-            draw(annotation: annotation, in: context, source: source)
+            draw(annotation: annotation, in: context, source: source, effectCache: effectCache)
         }
         context.restoreGState()
     }
 
-    public static func draw(annotation: Annotation, in context: CGContext, source: RenderSource?) {
+    public static func draw(
+        annotation: Annotation,
+        in context: CGContext,
+        source: RenderSource?,
+        effectCache: AnnotationEffectCache? = nil
+    ) {
         let color = annotation.color
         context.setStrokeColor(color.nsColor.cgColor)
         context.setFillColor(color.nsColor.cgColor)
@@ -126,10 +142,10 @@ public enum AnnotationRenderer {
             drawText(string, origin: origin, fontSize: fontSize, color: color, in: context)
 
         case let .mosaic(rect):
-            drawMosaic(rect, lineWidth: annotation.lineWidth, source: source, in: context)
+            drawMosaic(rect, lineWidth: annotation.lineWidth, source: source, effectCache: effectCache, in: context)
 
         case let .blur(rect):
-            drawBlur(rect, lineWidth: annotation.lineWidth, source: source, in: context)
+            drawBlur(rect, lineWidth: annotation.lineWidth, source: source, effectCache: effectCache, in: context)
 
         case let .number(center, value):
             drawNumber(value, center: center, lineWidth: annotation.lineWidth, color: color, in: context)
@@ -272,11 +288,30 @@ public enum AnnotationRenderer {
 
     // MARK: - Effects
 
-    private static func drawMosaic(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource?, in context: CGContext) {
+    private static func drawMosaic(
+        _ rect: CGRect,
+        lineWidth: CGFloat,
+        source: RenderSource?,
+        effectCache: AnnotationEffectCache?,
+        in context: CGContext
+    ) {
         guard let source, rect.width >= 1, rect.height >= 1 else { return }
-        let key = effectKey(rect, lineWidth: lineWidth, isBlur: false, source: source)
-        guard let effect = cachedEffect(key: key, make: { makeMosaicEffect(rect, lineWidth: lineWidth, source: source) })
-        else { return }
+        let make = { makeMosaicEffect(rect, lineWidth: lineWidth, source: source) }
+        let effect: AnnotationEffectCache.Effect?
+        if let effectCache {
+            let key = AnnotationEffectCache.Key(
+                image: source.image,
+                origin: source.originInImage,
+                scale: source.pixelsPerPoint,
+                isBlur: false,
+                rect: rect,
+                lineWidth: lineWidth
+            )
+            effect = effectCache.effect(for: key, make: make)
+        } else {
+            effect = make()
+        }
+        guard let effect else { return }
         context.saveGState()
         context.clip(to: rect)
         context.interpolationQuality = .none
@@ -284,7 +319,7 @@ public enum AnnotationRenderer {
         context.restoreGState()
     }
 
-    private static func makeMosaicEffect(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource) -> CachedEffect? {
+    private static func makeMosaicEffect(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource) -> AnnotationEffectCache.Effect? {
         let scale = source.pixelsPerPoint
         let pixelRect = CGRect(
             x: source.originInImage.x + rect.minX * scale,
@@ -313,14 +348,33 @@ public enum AnnotationRenderer {
         smallContext.interpolationQuality = .low
         smallContext.draw(crop, in: CGRect(x: 0, y: 0, width: smallWidth, height: smallHeight))
         guard let smallImage = smallContext.makeImage() else { return nil }
-        return CachedEffect(image: smallImage, localRect: rect)
+        return AnnotationEffectCache.Effect(image: smallImage, localRect: rect)
     }
 
-    private static func drawBlur(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource?, in context: CGContext) {
+    private static func drawBlur(
+        _ rect: CGRect,
+        lineWidth: CGFloat,
+        source: RenderSource?,
+        effectCache: AnnotationEffectCache?,
+        in context: CGContext
+    ) {
         guard let source, rect.width >= 1, rect.height >= 1 else { return }
-        let key = effectKey(rect, lineWidth: lineWidth, isBlur: true, source: source)
-        guard let effect = cachedEffect(key: key, make: { makeBlurEffect(rect, lineWidth: lineWidth, source: source) })
-        else { return }
+        let make = { makeBlurEffect(rect, lineWidth: lineWidth, source: source) }
+        let effect: AnnotationEffectCache.Effect?
+        if let effectCache {
+            let key = AnnotationEffectCache.Key(
+                image: source.image,
+                origin: source.originInImage,
+                scale: source.pixelsPerPoint,
+                isBlur: true,
+                rect: rect,
+                lineWidth: lineWidth
+            )
+            effect = effectCache.effect(for: key, make: make)
+        } else {
+            effect = make()
+        }
+        guard let effect else { return }
         context.saveGState()
         context.clip(to: rect)
         context.interpolationQuality = .high
@@ -328,7 +382,7 @@ public enum AnnotationRenderer {
         context.restoreGState()
     }
 
-    private static func makeBlurEffect(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource) -> CachedEffect? {
+    private static func makeBlurEffect(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource) -> AnnotationEffectCache.Effect? {
         let scale = source.pixelsPerPoint
         let padPoints = max(8, lineWidth * 5)
         let expanded = rect.insetBy(dx: -padPoints, dy: -padPoints)
@@ -353,7 +407,7 @@ public enum AnnotationRenderer {
 
         let clippedLocal = Geometry.pointRect(for: clipped, scale: scale)
             .offsetBy(dx: -source.originInImage.x / scale, dy: -source.originInImage.y / scale)
-        return CachedEffect(image: blurred, localRect: clippedLocal)
+        return AnnotationEffectCache.Effect(image: blurred, localRect: clippedLocal)
     }
 
     public static func averageColor(of image: CGImage, at point: CGPoint) -> RGBAColor? {

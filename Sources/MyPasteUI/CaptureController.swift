@@ -24,9 +24,10 @@ public final class CaptureController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let screens = try await self.service.captureAllScreens()
+                let batch = try await self.service.captureAllScreens()
                 self.isCapturing = false
-                self.presentSession(screens: screens, mode: .edit)
+                self.warnUnmappedScreens(batch.unmappedScreenCount)
+                self.presentSession(screens: batch.screens, mode: .edit)
             } catch {
                 self.isCapturing = false
                 self.handleCaptureError(error)
@@ -41,14 +42,26 @@ public final class CaptureController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let screens = try await self.service.captureAllScreens()
+                let batch = try await self.service.captureAllScreens()
                 self.isCapturing = false
-                self.presentSession(screens: screens, mode: .colorPicker)
+                self.warnUnmappedScreens(batch.unmappedScreenCount)
+                self.presentSession(screens: batch.screens, mode: .colorPicker)
             } catch {
                 self.isCapturing = false
                 self.handleCaptureError(error)
             }
         }
+    }
+
+    private func warnUnmappedScreens(_ count: Int) {
+        guard count > 0 else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "部分显示器未能冻结"
+        alert.informativeText = "\(count) 块显示器无法匹配到系统采集源，本次截图只覆盖其余屏幕。"
+        alert.addButton(withTitle: "继续")
+        NSApp.activate()
+        alert.runModal()
     }
 
     public func captureFullScreen() {

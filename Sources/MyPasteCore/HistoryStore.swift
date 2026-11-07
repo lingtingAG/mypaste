@@ -10,6 +10,7 @@ public struct HistoryEntry: Identifiable, Hashable, Sendable {
     public let createdAt: Date
     public let pixelSize: CGSize?
     public let fileSize: Int64
+    public let thumbnailFileSize: Int64
 
     public init(
         id: String,
@@ -17,7 +18,8 @@ public struct HistoryEntry: Identifiable, Hashable, Sendable {
         thumbnailURL: URL,
         createdAt: Date,
         pixelSize: CGSize?,
-        fileSize: Int64
+        fileSize: Int64,
+        thumbnailFileSize: Int64 = 0
     ) {
         self.id = id
         self.url = url
@@ -25,7 +27,11 @@ public struct HistoryEntry: Identifiable, Hashable, Sendable {
         self.createdAt = createdAt
         self.pixelSize = pixelSize
         self.fileSize = fileSize
+        self.thumbnailFileSize = thumbnailFileSize
     }
+
+    /// 磁盘占用 = 原图 + 缩略图，清理预算按此计算
+    public var diskFootprint: Int64 { fileSize + thumbnailFileSize }
 }
 
 public final class HistoryStore {
@@ -61,7 +67,7 @@ public final class HistoryStore {
         queue.async { [weak self] in
             guard let self else { return }
             do {
-                let entry = try self.recordSync(image, pngData: pngData, limit: limit, diskLimitMB: diskLimit)
+                let entry = try self.recordOnQueue(image, pngData: pngData, limit: limit, diskLimitMB: diskLimit)
                 DispatchQueue.main.async {
                     completion?(entry)
                     NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
@@ -76,12 +82,24 @@ public final class HistoryStore {
         return nil
     }
 
+    /// 同步入口，内部仍经串行队列序列化；不可在 store 队列内部调用（会死锁）
     @discardableResult
     public func recordSync(
         _ image: CGImage,
         pngData: Data? = nil,
         limit: Int? = nil,
         diskLimitMB: Int? = nil
+    ) throws -> HistoryEntry {
+        try queue.sync {
+            try recordOnQueue(image, pngData: pngData, limit: limit, diskLimitMB: diskLimitMB)
+        }
+    }
+
+    private func recordOnQueue(
+        _ image: CGImage,
+        pngData: Data?,
+        limit: Int?,
+        diskLimitMB: Int?
     ) throws -> HistoryEntry {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
         let now = Date()
@@ -95,9 +113,16 @@ public final class HistoryStore {
         }
         try png.write(to: url, options: .atomic)
 
+        var thumbnailSize: Int64 = 0
         if let thumb = Self.makeThumbnail(image, maxPixel: 640),
            let thumbData = ImageExporter.pngData(thumb) {
-            try? thumbData.write(to: thumbnailURL, options: .atomic)
+            // 缩略图写入失败不阻断主记录，但预算只统计实际落盘的字节
+            do {
+                try thumbData.write(to: thumbnailURL, options: .atomic)
+                thumbnailSize = Int64(thumbData.count)
+            } catch {
+                thumbnailSize = 0
+            }
         }
 
         let entry = HistoryEntry(
@@ -106,9 +131,10 @@ public final class HistoryStore {
             thumbnailURL: thumbnailURL,
             createdAt: now,
             pixelSize: CGSize(width: image.width, height: image.height),
-            fileSize: Int64(png.count)
+            fileSize: Int64(png.count),
+            thumbnailFileSize: thumbnailSize
         )
-        try prune(limit: limit ?? AppSettings.shared.historyLimit, diskLimitMB: diskLimitMB)
+        try pruneOnQueue(limit: limit ?? AppSettings.shared.historyLimit, diskLimitBytes: diskLimitMB.map { Int64($0) * 1024 * 1024 })
         return entry
     }
 
@@ -133,71 +159,113 @@ public final class HistoryStore {
                 let values = try? url.resourceValues(forKeys: Set(keys))
                 let created = values?.creationDate ?? values?.contentModificationDate ?? Date.distantPast
                 let thumb = rootURL.appendingPathComponent(url.deletingPathExtension().lastPathComponent + "_thumb.png")
+                let thumbValues = try? thumb.resourceValues(forKeys: [.fileSizeKey])
                 return HistoryEntry(
                     id: url.deletingPathExtension().lastPathComponent,
                     url: url,
                     thumbnailURL: thumb,
                     createdAt: created,
                     pixelSize: Self.pixelSize(of: url),
-                    fileSize: Int64(values?.fileSize ?? 0)
+                    fileSize: Int64(values?.fileSize ?? 0),
+                    thumbnailFileSize: Int64(thumbValues?.fileSize ?? 0)
                 )
             }
             .sorted { $0.createdAt > $1.createdAt }
     }
 
-    public func delete(_ entry: HistoryEntry) {
+    public func delete(_ entry: HistoryEntry, onError: ((Error) -> Void)? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
-            try? FileManager.default.removeItem(at: entry.url)
-            try? FileManager.default.removeItem(at: entry.thumbnailURL)
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
-            }
-        }
-    }
-
-    public func clear() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            let fm = FileManager.default
-            if let urls = try? fm.contentsOfDirectory(at: self.rootURL, includingPropertiesForKeys: nil) {
-                for url in urls where url.pathExtension.lowercased() == "png" {
-                    try? fm.removeItem(at: url)
+            var firstError: Error?
+            for url in [entry.url, entry.thumbnailURL] {
+                do {
+                    try FileManager.default.removeItem(at: url)
+                } catch {
+                    // 文件已不存在视为删除成功（缩略图可能从未写成功）
+                    if !Self.isMissingFile(error), firstError == nil { firstError = error }
                 }
             }
             DispatchQueue.main.async {
+                if let firstError { onError?(firstError) }
                 NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
             }
         }
     }
 
-    /// 按条数与磁盘字节双重上限清理，从最旧开始删除，至少保留最新一条
+    public func clear(onError: ((Error) -> Void)? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let fm = FileManager.default
+            var firstError: Error?
+            do {
+                let urls = try fm.contentsOfDirectory(at: self.rootURL, includingPropertiesForKeys: nil)
+                for url in urls where url.pathExtension.lowercased() == "png" {
+                    do {
+                        try fm.removeItem(at: url)
+                    } catch {
+                        if !Self.isMissingFile(error), firstError == nil { firstError = error }
+                    }
+                }
+            } catch {
+                if !Self.isMissingFile(error) { firstError = error }
+            }
+            DispatchQueue.main.async {
+                if let firstError { onError?(firstError) }
+                NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
+            }
+        }
+    }
+
+    /// 按条数与磁盘字节双重上限清理，从最旧开始删除，至少保留最新一条。
+    /// 同步入口，内部经串行队列序列化；不可在 store 队列内部调用。
     public func prune(limit: Int, diskLimitMB: Int? = nil) throws {
         try prune(limit: limit, diskLimitBytes: diskLimitMB.map { Int64($0) * 1024 * 1024 })
     }
 
     public func prune(limit: Int, diskLimitBytes: Int64?) throws {
+        try queue.sync {
+            try pruneOnQueue(limit: limit, diskLimitBytes: diskLimitBytes)
+        }
+    }
+
+    private func pruneOnQueue(limit: Int, diskLimitBytes: Int64?) throws {
         var kept = Self.listEntries(in: rootURL)
-        var total = kept.reduce(Int64(0)) { $0 + $1.fileSize }
+        var total = kept.reduce(Int64(0)) { $0 + $1.diskFootprint }
         while kept.count > 1,
               kept.count > limit || (diskLimitBytes.map { total > $0 } ?? false) {
             let removed = kept.removeLast()
-            total -= removed.fileSize
-            try? FileManager.default.removeItem(at: removed.url)
-            try? FileManager.default.removeItem(at: removed.thumbnailURL)
+            total -= removed.diskFootprint
+            for url in [removed.url, removed.thumbnailURL] {
+                do {
+                    try FileManager.default.removeItem(at: url)
+                } catch {
+                    if !Self.isMissingFile(error) { throw error }
+                }
+            }
         }
     }
 
     /// 外部调用的清理入口（设置变更时），走内部队列并在完成后发通知
-    public func pruneAsync(limit: Int, diskLimitMB: Int? = nil) {
+    public func pruneAsync(limit: Int, diskLimitMB: Int? = nil, onError: ((Error) -> Void)? = nil) {
         let disk = diskLimitMB ?? AppSettings.shared.historyDiskLimitMB
         queue.async { [weak self] in
             guard let self else { return }
-            try? self.prune(limit: limit, diskLimitMB: disk)
+            var failure: Error?
+            do {
+                try self.pruneOnQueue(limit: limit, diskLimitBytes: Int64(disk) * 1024 * 1024)
+            } catch {
+                failure = error
+            }
             DispatchQueue.main.async {
+                if let failure { onError?(failure) }
                 NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
             }
         }
+    }
+
+    private static func isMissingFile(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError
     }
 
     public static func makeThumbnail(_ image: CGImage, maxPixel: CGFloat) -> CGImage? {
