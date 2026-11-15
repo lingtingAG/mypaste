@@ -162,6 +162,11 @@ private final class HistoryCardView: NSView {
 }
 
 private final class HistoryGridView: NSView {
+    // 卡片布局参数的唯一来源，控制器与自身 layout 共用，避免两处硬编码漂移
+    static let cardSize = CGSize(width: 210, height: 176)
+    static let gap: CGFloat = 14
+    static let inset: CGFloat = 18
+
     var cards: [HistoryCardView] = []
     var onSelect: ((Int) -> Void)?
     var onActivate: ((Int) -> Void)?
@@ -207,7 +212,7 @@ private final class HistoryGridView: NSView {
 
     override func layout() {
         super.layout()
-        _ = layoutCards(width: bounds.width, cardSize: CGSize(width: 210, height: 176), gap: 14, inset: 18)
+        _ = layoutCards(width: bounds.width, cardSize: Self.cardSize, gap: Self.gap, inset: Self.inset)
     }
 }
 
@@ -238,6 +243,9 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
     private var buttons: [NSButton] = []
     private var entries: [HistoryEntry] = []
     private var selectedIndex: Int?
+    // 选中项按 id 记录：reload 后 entries 会重排，下标会指向另一张图
+    private var selectedEntryID: String?
+    private var reloadGeneration = 0
     private var thumbnails: [String: NSImage] = [:]
     private var thumbnailOrder: [String] = []
     private let thumbnailCacheLimit = 120
@@ -245,9 +253,9 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
     private var historyObserver: NSObjectProtocol?
     private var lastGridWidth: CGFloat = 0
 
-    private let cardSize = CGSize(width: 210, height: 176)
-    private let gridGap: CGFloat = 14
-    private let gridInset: CGFloat = 18
+    private var cardSize: CGSize { HistoryGridView.cardSize }
+    private var gridGap: CGFloat { HistoryGridView.gap }
+    private var gridInset: CGFloat { HistoryGridView.inset }
 
     public init(store: HistoryStore = .shared, pinBoard: PinBoard) {
         self.store = store
@@ -265,7 +273,8 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         ensureWindow()
         reload()
         NSApp.activate()
-        window?.center()
+        // 已可见时保留用户摆放的位置，只在重新打开时居中（与设置窗口一致）
+        if window?.isVisible != true { window?.center() }
         window?.makeKeyAndOrderFront(nil)
     }
 
@@ -412,19 +421,42 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
     }
 
     private func reload(synchronously: Bool = false) {
-        entries = store.entries()
+        if synchronously {
+            // 使在途异步结果失效，避免旧扫描覆盖本次同步结果
+            reloadGeneration += 1
+            apply(entries: store.entries(), loadThumbnailsSynchronously: true)
+            return
+        }
+        // 目录扫描与图片头解析都在后台，避免主线程同步等待历史写盘队列
+        let store = self.store
+        reloadGeneration += 1
+        let generation = reloadGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let entries = store.entries()
+            DispatchQueue.main.async {
+                guard let self, self.reloadGeneration == generation else { return }
+                self.apply(entries: entries, loadThumbnailsSynchronously: false)
+            }
+        }
+    }
+
+    private func apply(entries: [HistoryEntry], loadThumbnailsSynchronously: Bool) {
+        self.entries = entries
         thumbnailLoadGeneration += 1
-        if let selectedIndex, selectedIndex >= entries.count {
-            self.selectedIndex = nil
+        if let selectedEntryID {
+            selectedIndex = entries.firstIndex { $0.id == selectedEntryID }
+        } else {
+            selectedIndex = nil
         }
         gridView?.rebuild(entries: entries) { [weak self] entry in
             self?.cachedThumbnail(for: entry)
         }
+        gridView?.setSelectedIndex(selectedIndex)
         emptyLabel?.isHidden = !entries.isEmpty
         countLabel?.stringValue = entries.isEmpty ? "" : "共 \(entries.count) 张 · 上限 \(AppSettings.shared.historyLimit) 张"
         refreshButtons()
         layoutSubtreeAndGrid(force: true)
-        if synchronously {
+        if loadThumbnailsSynchronously {
             for entry in entries where thumbnails[entry.id] == nil {
                 if let image = Self.loadThumbnailImage(entry) {
                     storeThumbnail(image, for: entry.id)
@@ -493,6 +525,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
 
     private func select(index: Int) {
         selectedIndex = index
+        selectedEntryID = entries.indices.contains(index) ? entries[index].id : nil
         gridView?.setSelectedIndex(index)
         refreshButtons()
     }
@@ -510,27 +543,36 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
     }
 
     @objc private func copySelected() {
-        guard let entry = selectedEntry, let image = loadImage(entry) else { return }
-        PasteboardWriter.writeImage(image)
-        if AppSettings.shared.playSound {
-            NSSound(named: "Tink")?.play()
+        guard let entry = selectedEntry else { return }
+        loadImage(entry) { image in
+            guard let image else { return }
+            PasteboardWriter.writeImage(image)
+            if AppSettings.shared.playSound {
+                NSSound(named: "Tink")?.play()
+            }
         }
     }
 
     @objc private func pinSelected() {
-        guard let entry = selectedEntry, let image = loadImage(entry) else { return }
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { $0.visibleFrame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
-        pinBoard.present(
-            image: image,
-            at: nil,
-            screen: screen,
-            scale: max(1, screen.backingScaleFactor)
-        )
+        guard let entry = selectedEntry else { return }
+        loadImage(entry) { [weak self] image in
+            guard let self, let image else { return }
+            let mouse = NSEvent.mouseLocation
+            guard let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(mouse) })
+                ?? NSScreen.main
+                ?? NSScreen.screens.first
+            else { return }
+            self.pinBoard.present(
+                image: image,
+                at: nil,
+                screen: screen,
+                scale: max(1, screen.backingScaleFactor)
+            )
+        }
     }
 
     @objc private func saveSelected() {
-        guard let entry = selectedEntry, let image = loadImage(entry), let window else { return }
+        guard let entry = selectedEntry, let window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff]
         panel.nameFieldStringValue = entry.url.lastPathComponent
@@ -538,13 +580,21 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         panel.directoryURL = AppSettings.shared.saveDirectory
         panel.beginSheetModal(for: window) { [weak window, weak panel] response in
             guard let window, let panel, response == .OK, let url = panel.url else { return }
-            do {
-                try ImageExporter.write(image, to: url)
-            } catch {
-                let alert = NSAlert()
-                alert.messageText = "保存失败"
-                alert.informativeText = error.localizedDescription
-                alert.beginSheetModal(for: window)
+            // 解码与编码都在后台执行，避免大图阻塞主线程
+            DispatchQueue.global(qos: .userInitiated).async {
+                var failure: Error?
+                do {
+                    guard let image = Self.decodeImage(at: entry.url) else {
+                        throw ImageExporter.ExportError.decodeFailed
+                    }
+                    try ImageExporter.write(image, to: url)
+                } catch {
+                    failure = error
+                }
+                DispatchQueue.main.async {
+                    guard let failure else { return }
+                    Self.presentSaveError(failure, window: window)
+                }
             }
         }
     }
@@ -557,6 +607,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
     @objc private func deleteSelected() {
         guard let entry = selectedEntry else { return }
         selectedIndex = nil
+        selectedEntryID = nil
         refreshButtons()
         // 删除在 store 队列异步执行，完成后由 didChange 通知触发 reload
         store.delete(entry, onError: { [weak self] error in self?.presentHistoryError(error) })
@@ -573,6 +624,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
             self?.selectedIndex = nil
+            self?.selectedEntryID = nil
             self?.thumbnails.removeAll()
             self?.thumbnailOrder.removeAll()
             self?.store.clear(onError: { [weak self] error in self?.presentHistoryError(error) })
@@ -592,8 +644,33 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func loadImage(_ entry: HistoryEntry) -> CGImage? {
-        guard let source = CGImageSourceCreateWithURL(entry.url as CFURL, nil) else { return nil }
+    // 写盘期间窗口可能已被关闭：挂不可见窗口的 sheet 等于静默失败，退回独立弹窗
+    private static func presentSaveError(_ error: Error, window: NSWindow?) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "保存失败"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        if let window, window.isVisible {
+            alert.beginSheetModal(for: window)
+        } else {
+            NSApp.activate()
+            alert.runModal()
+        }
+    }
+
+    /// 后台解码全尺寸原图，完成后回主线程（大图解码不应阻塞主线程）
+    private func loadImage(_ entry: HistoryEntry, completion: @escaping (CGImage?) -> Void) {
+        let url = entry.url
+        DispatchQueue.global(qos: .userInitiated).async {
+            let image = Self.decodeImage(at: url)
+            DispatchQueue.main.async { completion(image) }
+        }
+    }
+
+    // ImageIO 解码线程安全，标 nonisolated 便于后台队列直接调用
+    private nonisolated static func decodeImage(at url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
@@ -650,6 +727,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         countLabel = nil
         buttons.removeAll()
         selectedIndex = nil
+        selectedEntryID = nil
         lastGridWidth = 0
         // 同步置空，避免关闭后立即重开时复用已清空的旧窗口
         window = nil

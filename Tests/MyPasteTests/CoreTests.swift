@@ -67,6 +67,20 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(rect, CGRect(x: 20, y: 41, width: 201, height: 101))
     }
 
+    func testPointRectInvertsPixelRectWithinHalfPixel() {
+        let rect = CGRect(x: 5.25, y: 7.4, width: 100.5, height: 40.25)
+        let scale: CGFloat = 1.5
+        let pixel = Geometry.pixelRect(for: rect, scale: scale)
+        let restored = Geometry.pointRect(for: pixel, scale: scale)
+        let tolerance = 0.5 / scale + 1e-9
+        XCTAssertEqual(restored.minX, rect.minX, accuracy: tolerance)
+        XCTAssertEqual(restored.minY, rect.minY, accuracy: tolerance)
+        XCTAssertEqual(restored.maxX, rect.maxX, accuracy: tolerance)
+        XCTAssertEqual(restored.maxY, rect.maxY, accuracy: tolerance)
+        // scale 非法时退回空矩形，避免除零
+        XCTAssertEqual(Geometry.pointRect(for: pixel, scale: 0), .zero)
+    }
+
     func testDistanceToSegment() {
         let distance = Geometry.distance(
             from: CGPoint(x: 0, y: 5),
@@ -89,6 +103,9 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(ClipboardCard.parseColor("#00A3FF")?.hexString, "#00A3FF")
         XCTAssertEqual(ClipboardCard.parseColor("rgb(255, 0, 0)")?.hexString, "#FF0000")
         XCTAssertEqual(ClipboardCard.parseColor("rgba(0, 255, 0, 0.5)")?.alpha ?? 0, 0.5, accuracy: 0.001)
+        // CSS 允许 alpha 使用百分比，解析失败不应静默回退为不透明
+        XCTAssertEqual(ClipboardCard.parseColor("rgba(0, 255, 0, 50%)")?.alpha ?? 0, 0.5, accuracy: 0.001)
+        XCTAssertNil(ClipboardCard.parseColor("rgba(0, 255, 0, abc)"))
         XCTAssertEqual(ClipboardCard.parseColor("0x336699")?.hexString, "#336699")
         XCTAssertEqual(ClipboardCard.parseColor("红色")?.hexString, RGBAColor.red.hexString)
         XCTAssertNil(ClipboardCard.parseColor("123456"))
@@ -116,6 +133,41 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(Shortcut.capture.displayString, "F1")
         XCTAssertEqual(Shortcut.pin.displayString, "F3")
         XCTAssertEqual(Shortcut(keyCode: 0, modifiers: UInt32(cmdKey) | UInt32(shiftKey)).displayString, "⇧⌘A")
+    }
+
+    func testShortcutFromEventFiltersInvalidKeys() throws {
+        let letter = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command, .shift],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "a",
+            charactersIgnoringModifiers: "a",
+            isARepeat: false,
+            keyCode: UInt16(kVK_ANSI_A)
+        ))
+        let shortcut = try XCTUnwrap(Shortcut.from(event: letter))
+        XCTAssertEqual(shortcut.keyCode, UInt32(kVK_ANSI_A))
+        XCTAssertTrue(shortcut.hasCommand)
+        XCTAssertTrue(shortcut.hasShift)
+        XCTAssertFalse(shortcut.hasOption)
+
+        // 纯修饰键不能作为快捷键
+        let modifier = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: UInt16(kVK_Command)
+        ))
+        XCTAssertNil(Shortcut.from(event: modifier))
     }
 
     func testShortcutCodableRoundTrip() throws {
@@ -159,6 +211,52 @@ final class CoreTests: XCTestCase {
         ))
         XCTAssertEqual(cropped.width, 400)
         XCTAssertEqual(cropped.height, 200)
+    }
+
+    func testComposeFractionalSelectionHasOpaqueEdges() throws {
+        let image = try makeTestImage(width: 400, height: 300)
+        let annotation = Annotation(
+            kind: .rectangle(CGRect(x: 10, y: 10, width: 40, height: 30)),
+            color: .green,
+            lineWidth: 4
+        )
+        // 分数选区 + 非整数 scale：pixelRect 比 selection.size*scale 多出的像素不得留透明缝
+        let composed = try XCTUnwrap(ImageComposer.compose(
+            baseImage: image,
+            selectionRect: CGRect(x: 10.3, y: 20.7, width: 100.2, height: 50.5),
+            screenScale: 1.5,
+            annotations: [annotation]
+        ))
+        let sampler = PixelSampler(image: composed)
+        let edgePoints = [
+            CGPoint(x: composed.width - 1, y: 0),
+            CGPoint(x: 0, y: composed.height - 1),
+            CGPoint(x: composed.width - 1, y: composed.height - 1),
+            CGPoint(x: composed.width - 1, y: composed.height / 2),
+            CGPoint(x: composed.width / 2, y: composed.height - 1),
+        ]
+        for point in edgePoints {
+            let color = try XCTUnwrap(sampler.color(at: point))
+            XCTAssertEqual(color.alpha, 1, accuracy: 0.01, "边缘像素 \(point) 不应透明")
+        }
+    }
+
+    func testCropClampsSelectionToImageBounds() throws {
+        let image = try makeTestImage(width: 40, height: 30)
+        // 选区越出图像左上角：裁剪结果必须收缩到图像范围内
+        let cropped = try XCTUnwrap(ImageComposer.crop(
+            image,
+            selectionRect: CGRect(x: -10, y: -10, width: 30, height: 20),
+            scale: 2
+        ))
+        XCTAssertEqual(cropped.width, 40)
+        XCTAssertEqual(cropped.height, 20)
+        // 完全越界返回 nil，而不是空图
+        XCTAssertNil(ImageComposer.crop(
+            image,
+            selectionRect: CGRect(x: 100, y: 100, width: 20, height: 20),
+            scale: 1
+        ))
     }
 
     func testComposeFilledAnnotation() throws {
@@ -419,6 +517,19 @@ final class CoreTests: XCTestCase {
 
     // MARK: - Effect cache
 
+    func testMosaicEffectClipsLocalRectToImageBounds() throws {
+        let image = try makeTestImage(width: 40, height: 40)
+        let source = RenderSource(image: image, originInImage: .zero, pixelsPerPoint: 2)
+        // 马赛克矩形越过源图左/上边界：绘制矩形必须收缩到实际可采样区域，
+        // 否则小块图会被拉伸铺满原 rect（与 blur 路径一致）
+        let effect = try XCTUnwrap(AnnotationRenderer.makeMosaicEffect(
+            CGRect(x: -10, y: -10, width: 30, height: 30),
+            lineWidth: 4,
+            source: source
+        ))
+        XCTAssertEqual(effect.localRect, CGRect(x: 0, y: 0, width: 20, height: 20))
+    }
+
     func testEffectCacheHitIdentityAndEviction() throws {
         let image = try makeTestImage(width: 40, height: 30)
         let other = try makeTestImage(width: 40, height: 30)
@@ -480,6 +591,113 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(store.entries().count, 1)
     }
 
+    func testHistoryRecordReportsWriteError() throws {
+        // 历史根目录被同名的普通文件占用：写入必然失败，异步接口必须回调 onError
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: root.path, contents: Data([0]))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 10, height: 10)
+
+        let failed = expectation(description: "record error")
+        store.record(image, completion: { entry in
+            XCTAssertNil(entry)
+        }, onError: { _ in
+            failed.fulfill()
+        })
+        wait(for: [failed], timeout: 5)
+    }
+
+    func testHistoryPruneAsyncReportsIOError() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+        _ = try store.recordSync(image, limit: 10)
+        _ = try store.recordSync(image, limit: 10)
+        // 用不可变标记让最旧的原图删除失败（不依赖运行用户权限），pruneAsync 必须上报而非静默
+        let oldest = try XCTUnwrap(store.entries().last)
+        try FileManager.default.setAttributes(
+            [.creationDate: Date(timeIntervalSince1970: 0)],
+            ofItemAtPath: oldest.url.path
+        )
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: oldest.url.path)
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: oldest.url.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let failed = expectation(description: "prune error")
+        store.pruneAsync(limit: 1, onError: { _ in failed.fulfill() })
+        wait(for: [failed], timeout: 5)
+    }
+
+    func testHistoryRecordReportsPruneErrorSeparately() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+        _ = try store.recordSync(image, limit: 10)
+        _ = try store.recordSync(image, limit: 10)
+        // 让最旧的原图无法删除，强制 record 内部 prune 失败
+        let oldest = try XCTUnwrap(store.entries().last)
+        try FileManager.default.setAttributes(
+            [.creationDate: Date(timeIntervalSince1970: 0)],
+            ofItemAtPath: oldest.url.path
+        )
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: oldest.url.path)
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: oldest.url.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let completed = expectation(description: "record completion")
+        let pruneFailed = expectation(description: "prune error")
+        store.record(image, limit: 1, completion: { entry in
+            // 写入成功，结果仍交付；清理失败不得走写入错误通道
+            XCTAssertNotNil(entry)
+            completed.fulfill()
+        }, onError: { error in
+            XCTFail("write should succeed: \(error)")
+        }, onPruneError: { _ in
+            pruneFailed.fulfill()
+        })
+        wait(for: [completed, pruneFailed], timeout: 5)
+        // 清理继续推进到只剩 1 条计数，但不可变的旧图仍留在磁盘上
+        XCTAssertEqual(store.entries().count, 2)
+    }
+
+    func testHistoryPruneContinuesPastUndeletableFile() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+        _ = try store.recordSync(image, limit: 10)
+        _ = try store.recordSync(image, limit: 10)
+        _ = try store.recordSync(image, limit: 10)
+        // 最旧原图不可删除：错误应被收集，但不能中断整轮清理
+        let entries = store.entries()
+        let oldest = try XCTUnwrap(entries.last)
+        try FileManager.default.setAttributes(
+            [.creationDate: Date(timeIntervalSince1970: 0)],
+            ofItemAtPath: oldest.url.path
+        )
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: oldest.url.path)
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: oldest.url.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        // 字节上限小于任意单条记录：清理应继续删掉次新记录，直到只剩最新一条（加上删不掉的僵尸文件）
+        XCTAssertThrowsError(try store.prune(limit: 100, diskLimitBytes: 1))
+        let remaining = store.entries().map(\.id)
+        XCTAssertEqual(remaining.count, 2)
+        XCTAssertTrue(remaining.contains(oldest.id))
+        XCTAssertTrue(remaining.contains(entries[0].id))
+        XCTAssertFalse(remaining.contains(entries[1].id))
+    }
+
     // MARK: - Pixel sampling
 
     func testPixelSamplerMatchesOrientationAndBounds() throws {
@@ -511,6 +729,10 @@ final class CoreTests: XCTestCase {
         XCTAssertGreaterThan(top.red, 0.8)
         XCTAssertGreaterThan(bottom.blue, 0.8)
         XCTAssertNil(sampler.color(at: CGPoint(x: -1, y: 0)))
+        // 负分数坐标：Int() 向零截断不得把它当成第 0 列/行
+        XCTAssertNil(sampler.color(at: CGPoint(x: -0.5, y: 0)))
+        XCTAssertNil(sampler.color(at: CGPoint(x: 0, y: -0.5)))
+        XCTAssertNil(AnnotationRenderer.averageColor(of: image, at: CGPoint(x: -0.5, y: 0)))
         XCTAssertNil(sampler.color(at: CGPoint(x: 0, y: 20)))
     }
 
@@ -524,7 +746,49 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(png.prefix(4), Data([0x89, 0x50, 0x4E, 0x47]))
         XCTAssertEqual(jpeg.prefix(2), Data([0xFF, 0xD8]))
         XCTAssertTrue(tiff.starts(with: Data([0x49, 0x49])) || tiff.starts(with: Data([0x4D, 0x4D])))
-        XCTAssertNotNil(ImageExporter.data(for: image, fileExtension: "unknown"))
+        // 未知格式不得静默回退 PNG，否则写出扩展名与内容不符的文件
+        XCTAssertNil(ImageExporter.data(for: image, fileExtension: "unknown"))
+    }
+
+    func testExporterWriteCreatesDirectoriesAndFormats() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = try makeTestImage(width: 20, height: 10)
+
+        // 不存在的多级目录需自动创建，扩展名决定编码格式
+        let jpegURL = dir.appendingPathComponent("nested/shot.jpeg")
+        try ImageExporter.write(image, to: jpegURL)
+        XCTAssertEqual(try Data(contentsOf: jpegURL).prefix(2), Data([0xFF, 0xD8]))
+
+        // 无扩展名默认 PNG
+        let plainURL = dir.appendingPathComponent("shot")
+        try ImageExporter.write(image, to: plainURL)
+        XCTAssertEqual(try Data(contentsOf: plainURL).prefix(4), Data([0x89, 0x50, 0x4E, 0x47]))
+
+        // 不支持的扩展名显式报错，不写出内容与扩展名不符的文件
+        let webpURL = dir.appendingPathComponent("shot.webp")
+        XCTAssertThrowsError(try ImageExporter.write(image, to: webpURL))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: webpURL.path))
+    }
+
+    func testPasteboardImageAndTextRoundTrip() throws {
+        // 用独立命名剪贴板，避免测试污染用户剪贴板；结束后释放，避免残留到 pasteboard server
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("MyPasteTests-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let image = try makeTestImage(width: 32, height: 24)
+        PasteboardWriter.writeImage(image, to: pasteboard)
+        guard case let .image(restored, _)? = PasteboardReader.read(from: pasteboard) else {
+            return XCTFail("expected image content")
+        }
+        XCTAssertEqual(restored.width, 32)
+        XCTAssertEqual(restored.height, 24)
+
+        PasteboardWriter.writeText("hello", to: pasteboard)
+        guard case let .text(text)? = PasteboardReader.read(from: pasteboard) else {
+            return XCTFail("expected text content")
+        }
+        XCTAssertEqual(text, "hello")
     }
 
     func testTimestampedFileNames() {
@@ -538,7 +802,8 @@ final class CoreTests: XCTestCase {
     }
 
     func testSettingsClamping() throws {
-        let suite = "MyPasteTests-\(UUID().uuidString)"
+        // 固定 suite 名：removePersistentDomain 不会删除底层 plist，随机名会导致每次运行新增残留文件
+        let suite = "com.mypaste.tests.settings"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AppSettings(defaults: defaults)

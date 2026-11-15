@@ -7,11 +7,13 @@ public enum ImageExporter {
     public enum ExportError: LocalizedError {
         case encodingFailed
         case unsupportedType
+        case decodeFailed
 
         public var errorDescription: String? {
             switch self {
             case .encodingFailed: return "图片编码失败"
             case .unsupportedType: return "不支持的图片格式"
+            case .decodeFailed: return "图片读取失败"
             }
         }
     }
@@ -34,13 +36,21 @@ public enum ImageExporter {
             return jpegData(image)
         case "tif", "tiff":
             return tiffData(image)
-        default:
+        case "png":
             return pngData(image)
+        default:
+            return nil
         }
     }
 
+    private static let supportedExtensions: Set<String> = ["png", "jpg", "jpeg", "tif", "tiff"]
+
     public static func write(_ image: CGImage, to url: URL) throws {
-        let ext = url.pathExtension.isEmpty ? "png" : url.pathExtension
+        let ext = url.pathExtension.isEmpty ? "png" : url.pathExtension.lowercased()
+        // 扩展名与编码格式必须一致，未知格式显式报错而不是写出内容不符的文件
+        guard supportedExtensions.contains(ext) else {
+            throw ExportError.unsupportedType
+        }
         guard let data = data(for: image, fileExtension: ext) else {
             throw ExportError.encodingFailed
         }
@@ -84,8 +94,7 @@ public enum ImageExporter {
 }
 
 public enum PasteboardWriter {
-    public static func writeImage(_ image: CGImage) {
-        let pasteboard = NSPasteboard.general
+    public static func writeImage(_ image: CGImage, to pasteboard: NSPasteboard = .general) {
         pasteboard.clearContents()
         let item = NSPasteboardItem()
         // 惰性提供数据：复制时不阻塞主线程编码，读取方按需触发
@@ -93,8 +102,7 @@ public enum PasteboardWriter {
         pasteboard.writeObjects([item])
     }
 
-    public static func writeText(_ text: String) {
-        let pasteboard = NSPasteboard.general
+    public static func writeText(_ text: String, to pasteboard: NSPasteboard = .general) {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
     }
@@ -131,8 +139,7 @@ public enum ClipboardContent {
 }
 
 public enum PasteboardReader {
-    public static func read() -> ClipboardContent? {
-        let pasteboard = NSPasteboard.general
+    public static func read(from pasteboard: NSPasteboard = .general) -> ClipboardContent? {
         var logicalSize: CGSize?
         if let image = readImage(from: pasteboard, logicalSize: &logicalSize) {
             return .image(image, logicalSize: logicalSize)

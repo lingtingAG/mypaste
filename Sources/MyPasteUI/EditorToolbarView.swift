@@ -240,7 +240,8 @@ private final class FontSizeButton: NSButton {
     }
     private var trackingAreaRef: NSTrackingArea?
 
-    private static let sizes: [CGFloat] = [12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 64, 80]
+    // 预设档位覆盖 TextMetrics.clampedFontSize 的完整区间（10–120），避免与钳位上限脱节
+    private static let sizes: [CGFloat] = [12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 64, 80, 96, 112, 120]
 
     init(fontSize: CGFloat) {
         self.fontSize = fontSize

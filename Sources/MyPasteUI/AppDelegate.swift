@@ -43,6 +43,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         NSApp.setActivationPolicy(.accessory)
         setupMainMenu()
         setupStatusItem()
+        // 录制快捷键期间暂停全局热键，结束后统一恢复（成功/取消都走 endRecording）
+        ShortcutRecorderButton.onRecordingStateChange = { [weak self] isRecording in
+            guard let self else { return }
+            if isRecording {
+                self.hotKeyCenter.unregisterAll()
+            } else {
+                self.hotKeyFailures = self.reloadHotKeys()
+            }
+        }
         hotKeyFailures = reloadHotKeys()
         _ = HistoryStore.shared
         if !settings.hasCompletedWelcome {
@@ -344,9 +353,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     }
 
     @objc private func pinClipboard() {
-        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
             ?? NSScreen.main
-            ?? NSScreen.screens[0]
+            ?? NSScreen.screens.first
+        else { return }
         guard let content = PasteboardReader.read() else {
             NSSound.beep()
             let alert = NSAlert()

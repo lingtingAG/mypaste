@@ -23,21 +23,30 @@ public final class CaptureSession {
         public var onCopy: (CaptureResult) -> Void
         public var onPin: (CaptureResult) -> Void
         public var onSaved: (CaptureResult, URL) -> Void
+        /// 保存写盘失败：会话已结束，宿主必须在此复位自身状态（不能只依赖 onSaved/onCancel）
+        public var onSaveFailed: (Error) -> Void
         public var onCancel: () -> Void
         public var onColorPicked: (String) -> Void
+        /// 会话已结束（覆盖层已关闭）：宿主必须在此立即释放会话引用。
+        /// 写盘等异步收尾可能滞后于会话结束，引用不释放会让后续截图被"会话存在"的判断拦下
+        public var onClosed: () -> Void
 
         public init(
             onCopy: @escaping (CaptureResult) -> Void,
             onPin: @escaping (CaptureResult) -> Void,
             onSaved: @escaping (CaptureResult, URL) -> Void,
+            onSaveFailed: @escaping (Error) -> Void,
             onCancel: @escaping () -> Void,
-            onColorPicked: @escaping (String) -> Void
+            onColorPicked: @escaping (String) -> Void,
+            onClosed: @escaping () -> Void
         ) {
             self.onCopy = onCopy
             self.onPin = onPin
             self.onSaved = onSaved
+            self.onSaveFailed = onSaveFailed
             self.onCancel = onCancel
             self.onColorPicked = onColorPicked
+            self.onClosed = onClosed
         }
     }
 
@@ -143,6 +152,8 @@ public final class CaptureSession {
         guard let window = canvas.window else { return }
         if !window.isKeyWindow {
             window.makeKeyAndOrderFront(nil)
+            // 程序化创建的覆盖窗没有 initialFirstResponder：不显式指定，键盘事件不会进入画布
+            window.makeFirstResponder(canvas)
             canvas.updatePointerFromSystem()
         }
     }
@@ -194,12 +205,26 @@ public final class CaptureSession {
             self.savePanel = nil
             guard let canvas, let window, let panel else { return }
             if response == .OK, let url = panel.url {
-                do {
-                    try ImageExporter.write(result.image, to: url)
-                    self.close()
-                    self.callbacks.onSaved(result, url)
-                } catch {
-                    self.presentSaveError(error, window: window, canvas: canvas)
+                // 先结束会话再写盘：写盘期间保持可交互会让取消/继续编辑静默覆盖保存结果；
+                // 成败都必须回调宿主，否则会话对象会滞留在控制器里导致后续截图失效
+                let image = result.image
+                let callbacks = self.callbacks
+                self.close()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let failure: Error?
+                    do {
+                        try ImageExporter.write(image, to: url)
+                        failure = nil
+                    } catch {
+                        failure = error
+                    }
+                    DispatchQueue.main.async {
+                        if let failure {
+                            callbacks.onSaveFailed(failure)
+                        } else {
+                            callbacks.onSaved(result, url)
+                        }
+                    }
                 }
             } else {
                 window.makeKeyAndOrderFront(nil)
@@ -244,21 +269,11 @@ public final class CaptureSession {
         )
     }
 
-    private func presentSaveError(_ error: Error, window: NSWindow, canvas: SelectionCanvasView) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "保存失败"
-        alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window) { _ in
-            window.makeKey()
-            window.makeFirstResponder(canvas)
-        }
-    }
-
     private func close() {
         guard !isClosed else { return }
         isClosed = true
+        // 只有真正显示过覆盖窗才需要把焦点还给原应用
+        let hadOverlay = !windows.isEmpty
         if let resignObserver {
             NotificationCenter.default.removeObserver(resignObserver)
             self.resignObserver = nil
@@ -276,9 +291,14 @@ public final class CaptureSession {
         activeCanvas = nil
         savePanel = nil
 
-        if let previousApplication,
+        if hadOverlay,
+           let previousApplication,
            previousApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             NSApp.yieldActivation(to: previousApplication)
+        }
+        // 宿主会在此释放对会话的引用；自持一份，避免 close() 执行期间会话被提前释放
+        withExtendedLifetime(self) {
+            callbacks.onClosed()
         }
     }
 }

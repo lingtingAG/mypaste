@@ -12,6 +12,9 @@ public final class ShortcutRecorderButton: NSButton {
     private var eventMonitor: Any?
     private var resignObserver: NSObjectProtocol?
     private static weak var activeRecorder: ShortcutRecorderButton?
+    /// 录制开始/结束时通知（true=开始）。宿主应暂停/恢复全局热键，
+    /// 否则已注册组合会在 Carbon 层被吞掉并直接触发截图，录制不到也来不及取消。
+    public static var onRecordingStateChange: ((Bool) -> Void)?
 
     public init(shortcut: Shortcut) {
         self.shortcut = shortcut
@@ -70,6 +73,7 @@ public final class ShortcutRecorderButton: NSButton {
         Self.activeRecorder?.endRecording()
         Self.activeRecorder = self
         isRecording = true
+        Self.onRecordingStateChange?(true)
         title = "请按下快捷键…"
         bezelColor = .controlAccentColor
         contentTintColor = .white
@@ -109,6 +113,7 @@ public final class ShortcutRecorderButton: NSButton {
         if Self.activeRecorder === self {
             Self.activeRecorder = nil
         }
+        Self.onRecordingStateChange?(false)
         bezelColor = nil
         contentTintColor = nil
         updateTitle()

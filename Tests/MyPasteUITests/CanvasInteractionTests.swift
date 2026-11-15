@@ -8,10 +8,13 @@ final class CanvasInteractionTests: XCTestCase {
     private var window: NSWindow!
     private var canvas: SelectionCanvasView!
     private var captured: CapturedScreen!
+    // 工具栏动作会写 AppSettings.shared（UserDefaults.standard 的测试域），结束时还原避免污染后续运行
+    private var originalFontSize: CGFloat = 20
 
     override func setUp() {
         super.setUp()
         _ = NSApplication.shared
+        originalFontSize = AppSettings.shared.toolFontSize
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let image = Self.makeImage(width: 1600, height: 1200)
         captured = CapturedScreen(screen: screen, image: image, scale: 2)
@@ -28,6 +31,7 @@ final class CanvasInteractionTests: XCTestCase {
     }
 
     override func tearDown() {
+        AppSettings.shared.toolFontSize = originalFontSize
         window?.close()
         canvas = nil
         window = nil
@@ -208,6 +212,60 @@ final class CanvasInteractionTests: XCTestCase {
         XCTAssertEqual(selection.height, 350, accuracy: 0.5)
     }
 
+    func testThinDragKeepsUserSelection() throws {
+        // 宽/高不足 8pt 的有意细长拖选不应被替换为全屏选区
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 300, y: 105))
+        let selection = try XCTUnwrap(canvas.selection)
+        XCTAssertEqual(selection.minX, 100, accuracy: 0.5)
+        XCTAssertEqual(selection.minY, 100, accuracy: 0.5)
+        XCTAssertEqual(selection.width, 200, accuracy: 0.5)
+        XCTAssertEqual(selection.height, 8, accuracy: 0.5)
+    }
+
+    func testToolbarRelayoutsAfterReselecting() throws {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 400, y: 300))
+        let toolbar = try XCTUnwrap(canvas.subviews.compactMap { $0 as? EditorToolbarView }.first)
+        let firstFrame = toolbar.frame
+
+        // 选区外按下会先隐藏工具栏，再拖出新选区；工具栏必须按新选区重新布局
+        drag(from: CGPoint(x: 500, y: 450), to: CGPoint(x: 700, y: 550))
+        XCTAssertEqual(try XCTUnwrap(canvas.selection), CGRect(x: 500, y: 450, width: 200, height: 100))
+        XCTAssertNotEqual(toolbar.frame, firstFrame)
+        XCTAssertEqual(toolbar.frame.maxX, 700, accuracy: 0.5)
+        XCTAssertLessThan(toolbar.frame.maxY, 450)
+    }
+
+    func testArrowNudgeCoalescesIntoOneUndoStep() throws {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
+        press("t", keyCode: 17)
+        click(at: CGPoint(x: 200, y: 200))
+        let box = try XCTUnwrap(canvas.textEditingBox)
+        box.textField.stringValue = "Nudge"
+        canvas.commitTextEditing()
+
+        guard case let .text(original, _, fontSize) = canvas.annotations[0].kind else {
+            return XCTFail("Expected text annotation")
+        }
+        let textRect = TextMetrics.textRect(origin: original, string: "Nudge", fontSize: fontSize)
+        click(at: CGPoint(x: 100 + textRect.midX, y: 100 + textRect.midY))
+
+        sendKey(keyCode: 124)
+        sendKey(keyCode: 124)
+        sendKey(keyCode: 124)
+        guard case let .text(nudged, _, _) = canvas.annotations[0].kind else {
+            return XCTFail("Expected text annotation")
+        }
+        XCTAssertEqual(nudged.x, original.x + 3, accuracy: 0.5)
+
+        // 连续方向键微调合并为一条撤销记录：一次撤销回到起点且不删除文字
+        canvas.undo(nil)
+        XCTAssertEqual(canvas.annotations.count, 1)
+        guard case let .text(restored, _, _) = canvas.annotations[0].kind else {
+            return XCTFail("Expected text annotation")
+        }
+        XCTAssertEqual(restored.x, original.x, accuracy: 0.5)
+    }
+
     func testPrepareForExportComposesAnnotations() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
         press("r", keyCode: 15)
@@ -380,17 +438,22 @@ final class CanvasInteractionTests: XCTestCase {
         ))
         XCTAssertEqual(cacheImage.width, composed.width)
         XCTAssertEqual(cacheImage.height, composed.height)
-        // 序号圆心局部坐标 (320, 250)：中心被白色数字覆盖，取圆内左侧纯色区域
-        let dotPoint = CGPoint(x: 310 * captured.scale, y: 250 * captured.scale)
-        let cacheColor = try XCTUnwrap(PixelSampler(image: cacheImage).color(at: dotPoint))
-        let composedColor = try XCTUnwrap(PixelSampler(image: composed).color(at: dotPoint))
+        // 序号圆心局部坐标 (320, 250)：中心被白色数字覆盖，取圆内左侧纯色区域；
+        // 抽样多点而非单点，避免单点偶然一致掩盖渲染差异
+        let cacheSampler = PixelSampler(image: cacheImage)
+        let composedSampler = PixelSampler(image: composed)
         let expected = canvas.annotations[1].color
-        XCTAssertEqual(cacheColor.red, expected.red, accuracy: 0.08)
-        XCTAssertEqual(cacheColor.green, expected.green, accuracy: 0.08)
-        XCTAssertEqual(cacheColor.blue, expected.blue, accuracy: 0.08)
-        XCTAssertEqual(composedColor.red, cacheColor.red, accuracy: 0.02)
-        XCTAssertEqual(composedColor.green, cacheColor.green, accuracy: 0.02)
-        XCTAssertEqual(composedColor.blue, cacheColor.blue, accuracy: 0.02)
+        for offsetY in stride(from: -4, through: 4, by: 2) {
+            let dotPoint = CGPoint(x: 310 * captured.scale, y: (250 + CGFloat(offsetY)) * captured.scale)
+            let cacheColor = try XCTUnwrap(cacheSampler.color(at: dotPoint))
+            let composedColor = try XCTUnwrap(composedSampler.color(at: dotPoint))
+            XCTAssertEqual(cacheColor.red, expected.red, accuracy: 0.08)
+            XCTAssertEqual(cacheColor.green, expected.green, accuracy: 0.08)
+            XCTAssertEqual(cacheColor.blue, expected.blue, accuracy: 0.08)
+            XCTAssertEqual(composedColor.red, cacheColor.red, accuracy: 0.02)
+            XCTAssertEqual(composedColor.green, cacheColor.green, accuracy: 0.02)
+            XCTAssertEqual(composedColor.blue, cacheColor.blue, accuracy: 0.02)
+        }
     }
 
     func testMovingSelectionResamplesMosaicCache() throws {

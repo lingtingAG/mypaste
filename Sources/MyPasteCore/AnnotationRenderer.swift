@@ -319,7 +319,7 @@ public enum AnnotationRenderer {
         context.restoreGState()
     }
 
-    private static func makeMosaicEffect(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource) -> AnnotationEffectCache.Effect? {
+    static func makeMosaicEffect(_ rect: CGRect, lineWidth: CGFloat, source: RenderSource) -> AnnotationEffectCache.Effect? {
         let scale = source.pixelsPerPoint
         let pixelRect = CGRect(
             x: source.originInImage.x + rect.minX * scale,
@@ -348,7 +348,10 @@ public enum AnnotationRenderer {
         smallContext.interpolationQuality = .low
         smallContext.draw(crop, in: CGRect(x: 0, y: 0, width: smallWidth, height: smallHeight))
         guard let smallImage = smallContext.makeImage() else { return nil }
-        return AnnotationEffectCache.Effect(image: smallImage, localRect: rect)
+        // 采样区域被图像边界裁剪时同步收缩绘制矩形，避免小块图被拉伸铺满原 rect
+        let clippedLocal = Geometry.pointRect(for: clipped, scale: scale)
+            .offsetBy(dx: -source.originInImage.x / scale, dy: -source.originInImage.y / scale)
+        return AnnotationEffectCache.Effect(image: smallImage, localRect: clippedLocal)
     }
 
     private static func drawBlur(
@@ -411,9 +414,11 @@ public enum AnnotationRenderer {
     }
 
     public static func averageColor(of image: CGImage, at point: CGPoint) -> RGBAColor? {
+        // 先判负再截断：Int() 向零截断会让 -0.5 通过边界检查并误采样第 0 列
+        guard point.x >= 0, point.y >= 0 else { return nil }
         let x = Int(point.x)
         let y = Int(point.y)
-        guard x >= 0, y >= 0, x < image.width, y < image.height else { return nil }
+        guard x < image.width, y < image.height else { return nil }
         // 高频取色请用 PixelSampler；这里先裁剪 1px，避免把整图 draw 进 1×1 上下文
         guard let pixel = image.cropping(to: CGRect(x: x, y: y, width: 1, height: 1)) else { return nil }
         var rgba = [UInt8](repeating: 0, count: 4)

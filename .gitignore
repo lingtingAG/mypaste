@@ -6,3 +6,4 @@ build/
 vibe_images/
 *.xcuserstate
 docs/
+.screenshots/

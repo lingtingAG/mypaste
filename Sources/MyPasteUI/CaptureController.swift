@@ -104,7 +104,6 @@ public final class CaptureController {
                     PasteboardWriter.writeImage(result.image)
                     self.archive(result, autoSave: true)
                     self.playSound()
-                    self.session = nil
                 },
                 onPin: { [weak self] result in
                     guard let self else { return }
@@ -116,19 +115,23 @@ public final class CaptureController {
                     )
                     self.archive(result, autoSave: true)
                     self.playSound()
-                    self.session = nil
                 },
                 onSaved: { [weak self] result, _ in
                     guard let self else { return }
                     self.archive(result, autoSave: false)
                     self.playSound()
-                    self.session = nil
                 },
-                onCancel: { [weak self] in
-                    self?.session = nil
+                onSaveFailed: { [weak self] error in
+                    guard let self else { return }
+                    // 会话引用已在 onClosed 里释放；此处可能已有新会话，不能再清 session
+                    self.presentSaveError(error)
                 },
+                onCancel: {},
                 onColorPicked: { [weak self] _ in
                     self?.playSound()
+                },
+                onClosed: { [weak self] in
+                    // 会话一结束就释放引用：写盘等异步收尾期间不能挡住新的截图
                     self?.session = nil
                 }
             )
@@ -167,7 +170,7 @@ public final class CaptureController {
             presentPermissionAlert()
             return
         }
-        NSLog("MyPaste capture failed: \(error.localizedDescription)")
+        NSLog("MyPaste capture failed: %@", error.localizedDescription)
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "截图失败"
@@ -194,6 +197,10 @@ public final class CaptureController {
                 DispatchQueue.main.async {
                     self?.presentArchiveError(error)
                 }
+            }, onPruneError: { error in
+                DispatchQueue.main.async {
+                    self?.presentHistoryPruneError(error)
+                }
             })
             guard shouldAutoSave else { return }
             do {
@@ -207,13 +214,35 @@ public final class CaptureController {
         }
     }
 
+    private func presentSaveError(_ error: Error) {
+        presentErrorAlert(error, message: "保存截图失败", logPrefix: "MyPaste save failed")
+    }
+
     private func presentArchiveError(_ error: Error) {
-        NSLog("MyPaste archive failed: \(error.localizedDescription)")
+        presentErrorAlert(error, message: "保存截图失败", logPrefix: "MyPaste archive failed")
+    }
+
+    // 记录已写入，仅旧记录清理失败：文案不能报成"保存失败"，否则用户会误以为截图丢了。
+    // 这类失败会持续复现（删不掉的文件一直留在盘上），用非模态提示条而不是 alert，
+    // 否则之后每次截图都要手动关一次弹窗
+    private func presentHistoryPruneError(_ error: Error) {
+        NSLog("MyPaste history prune failed: %@", error.localizedDescription)
+        AppNotice.show(
+            title: "历史记录清理失败",
+            detail: "截图已保存，但清理旧历史记录失败：\(error.localizedDescription)"
+        )
+    }
+
+    /// 归档/保存类错误提示。截图覆盖窗为 .screenSaver 层级且不透明，
+    /// 普通 level 的 alert 会被新会话覆盖窗挡住但模态循环仍在跑，表现为界面假死
+    private func presentErrorAlert(_ error: Error, message: String, detail: String? = nil, logPrefix: String) {
+        NSLog("%@: %@", logPrefix, error.localizedDescription)
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "保存截图失败"
-        alert.informativeText = error.localizedDescription
+        alert.messageText = message
+        alert.informativeText = detail ?? error.localizedDescription
         alert.addButton(withTitle: "好")
+        alert.window.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         NSApp.activate()
         alert.runModal()
     }

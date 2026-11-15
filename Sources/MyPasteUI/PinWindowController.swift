@@ -397,19 +397,42 @@ private final class PinContentView: NSView {
         panel.beginSheetModal(for: window) { [weak self, weak window, weak panel] response in
             guard let self, let window, let panel else { return }
             if response == .OK, let url = panel.url {
-                do {
-                    try ImageExporter.write(self.image, to: url)
-                    self.flash("已保存")
-                    self.playSound()
-                } catch {
-                    let alert = NSAlert()
-                    alert.messageText = "保存失败"
-                    alert.informativeText = error.localizedDescription
-                    alert.beginSheetModal(for: window)
+                // 编码与写盘放后台，避免大图在保存面板回调里阻塞主线程
+                let image = self.image
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    var failure: Error?
+                    do {
+                        try ImageExporter.write(image, to: url)
+                    } catch {
+                        failure = error
+                    }
+                    DispatchQueue.main.async {
+                        if let failure {
+                            Self.presentSaveError(failure, window: window)
+                        } else {
+                            self?.flash("已保存")
+                            self?.playSound()
+                        }
+                    }
                 }
             }
             window.makeKey()
             window.makeFirstResponder(self)
+        }
+    }
+
+    // 写盘期间贴图窗口可能已关闭：挂不可见窗口的 sheet 等于静默失败，退回独立弹窗
+    private static func presentSaveError(_ error: Error, window: NSWindow?) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "保存失败"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        if let window, window.isVisible {
+            alert.beginSheetModal(for: window)
+        } else {
+            NSApp.activate()
+            alert.runModal()
         }
     }
 

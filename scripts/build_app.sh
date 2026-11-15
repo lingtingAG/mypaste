@@ -3,6 +3,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${1:-release}"
+case "$CONFIG" in
+    debug|release) ;;
+    *)
+        echo "Usage: $0 [debug|release]" >&2
+        exit 1
+        ;;
+esac
 cd "$ROOT"
 
 swift build -c "$CONFIG"
@@ -21,7 +28,9 @@ fi
 xattr -cr "$APP" 2>/dev/null || true
 # 单二进制无需 --deep（Apple 已不推荐），直接对 bundle 签名
 codesign --force --sign - --identifier com.mypaste.app "$APP" >/dev/null
+codesign --verify --strict "$APP"
 
 echo "Built: $APP"
 echo "Run:   open \"$APP\""
-echo "Note:  Grant Screen Recording to this app once in System Settings."
+echo "Note:  Ad-hoc signed; every rebuild changes the signature, so Screen Recording"
+echo "       permission may need to be granted again in System Settings."

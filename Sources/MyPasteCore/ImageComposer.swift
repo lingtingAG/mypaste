@@ -40,7 +40,13 @@ public enum ImageComposer {
         context.scaleBy(x: 1, y: -1)
         context.scaleBy(x: screenScale, y: screenScale)
 
-        let canvasRect = CGRect(origin: .zero, size: selectionRect.size)
+        // 底图按像素矩形对应的点尺寸从原点绘制：selectionRect.size * scale 可能比 pixelRect 少 1px，
+        // 按点尺寸绘制会在右/下边缘留半透明缝（与无标注路径、预览不一致）；
+        // 裁剪图对应选区原点，必须落在 (0,0) 而不是 pixelRect.origin 对应的偏移处
+        let canvasRect = CGRect(
+            origin: .zero,
+            size: Geometry.pointRect(for: pixelRect, scale: screenScale).size
+        )
         AnnotationRenderer.drawImageTopLeft(cropped, in: canvasRect, in: context)
         let source = RenderSource(image: cropped, originInImage: .zero, pixelsPerPoint: screenScale)
         AnnotationRenderer.draw(

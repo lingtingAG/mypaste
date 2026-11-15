@@ -88,6 +88,8 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     private(set) var selectedTextID: UUID?
     private var movingTextSnapshot: [Annotation]?
     private var movingTextDidChange = false
+    // 连续方向键微调合并为一次撤销记录，避免长按刷满撤销栈
+    private var nudgingSelectedText = false
     private var toastText: String?
     private var toastWorkItem: DispatchWorkItem?
     private var trackingAreaRef: NSTrackingArea?
@@ -202,6 +204,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             return
         }
         window?.makeFirstResponder(self)
+        nudgingSelectedText = false
         guard let window else { return }
         session?.activate(canvas: self)
         window.acceptsMouseMovedEvents = true
@@ -218,7 +221,9 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         }
 
         guard let currentSelection = selection else { return }
-        if let handle = Geometry.handleHit(at: point, in: currentSelection, tolerance: 8) {
+        // 小选区不绘制手柄（见 drawSelectionChrome），也不应响应手柄热区，否则内部点击会变成缩放
+        if currentSelection.width > 18, currentSelection.height > 18,
+           let handle = Geometry.handleHit(at: point, in: currentSelection, tolerance: 8) {
             dragState = .resizing(handle: handle, initial: currentSelection)
             updateCursor(at: point)
             return
@@ -359,10 +364,16 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
                 } else {
                     finalRect = bounds
                 }
-            }
-            finalRect = Geometry.clampedRect(finalRect, to: bounds)
-            if finalRect.width < 8 || finalRect.height < 8 {
-                finalRect = bounds
+                finalRect = Geometry.clampedRect(finalRect, to: bounds)
+                if finalRect.width < 8 || finalRect.height < 8 {
+                    finalRect = bounds
+                }
+            } else {
+                // 有意的细长拖选尊重用户尺寸，只钳位到最小可编辑尺寸，不替换为全屏
+                finalRect = Geometry.clampedRect(finalRect, to: bounds)
+                finalRect.size.width = max(finalRect.width, min(8, bounds.width))
+                finalRect.size.height = max(finalRect.height, min(8, bounds.height))
+                finalRect = Geometry.clampedRect(finalRect, to: bounds)
             }
             selection = finalRect
             annotations.removeAll()
@@ -549,7 +560,10 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             next.y = min(max(0, next.y), max(0, selection.height - size.height))
         }
         guard next != origin else { return true }
-        pushUndoSnapshot()
+        if !nudgingSelectedText {
+            pushUndoSnapshot()
+            nudgingSelectedText = true
+        }
         annotations[index].kind = .text(origin: next, string: string, fontSize: fontSize)
         needsDisplay = true
         return true
@@ -740,6 +754,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
 
     private func undoLastAnnotation() {
         guard let previous = undoStack.popLast() else { return }
+        nudgingSelectedText = false
         redoStack.append(annotations)
         annotations = previous
         clearMissingTextSelection()
@@ -749,6 +764,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
 
     private func redoLastAnnotation() {
         guard let next = redoStack.popLast() else { return }
+        nudgingSelectedText = false
         undoStack.append(annotations)
         annotations = next
         clearMissingTextSelection()
@@ -771,6 +787,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         undoStack.append(snapshot)
         if undoStack.count > 50 { undoStack.removeFirst() }
         redoStack.removeAll()
+        nudgingSelectedText = false
         updateToolbarState()
     }
 
@@ -1014,6 +1031,8 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     // MARK: - Color
 
     private func pixelColor(at localPoint: CGPoint) -> RGBAColor? {
+        // 预热后台像素缓冲：放大镜、C 键取色、取色器共用此入口，关闭放大镜时同样走缓冲
+        pixelSampler.prepare()
         let imagePoint = CGPoint(
             x: floor(min(max(localPoint.x, 0), bounds.width - 0.001) * captured.scale),
             y: floor(min(max(localPoint.y, 0), bounds.height - 0.001) * captured.scale)
@@ -1048,8 +1067,9 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             toolbar = bar
             addSubview(bar)
         }
-        layoutToolbar()
+        // 先取消隐藏再布局：layoutToolbar 会跳过隐藏中的工具栏，顺序反了会沿用旧选区的 frame
         toolbar?.isHidden = false
+        layoutToolbar()
         updateToolbarState()
     }
 
@@ -1140,7 +1160,9 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             return
         }
         if let selection {
-            if let handle = Geometry.handleHit(at: point, in: selection, tolerance: 8) {
+            // 与手柄绘制条件一致：小选区无手柄热区
+            if selection.width > 18, selection.height > 18,
+               let handle = Geometry.handleHit(at: point, in: selection, tolerance: 8) {
                 switch handle {
                 case .left, .right:
                     NSCursor.resizeLeftRight.set()
@@ -1303,7 +1325,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         context.translateBy(x: selection.minX, y: selection.minY)
         let source = RenderSource(
             image: captured.image,
-            originInImage: CGPoint(x: selection.minX * captured.scale, y: selection.minY * captured.scale),
+            originInImage: Geometry.pixelRect(for: selection, scale: captured.scale).origin,
             pixelsPerPoint: captured.scale
         )
         let visibleAnnotations = editingTextID == nil
@@ -1348,7 +1370,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         }
         let source = RenderSource(
             image: captured.image,
-            originInImage: CGPoint(x: selection.minX * captured.scale, y: selection.minY * captured.scale),
+            originInImage: Geometry.pixelRect(for: selection, scale: captured.scale).origin,
             pixelsPerPoint: captured.scale
         )
         guard let image = renderAnnotationCache(visibleAnnotations, selection: selection, source: source) else {
@@ -1581,6 +1603,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         border.lineWidth = 1
         border.stroke()
 
+        // 像素缓冲由 pixelColor 统一预热：首次绘制不阻塞主线程，就绪前走单像素降级采样
         guard let color = pixelColor(at: cursor) else { return }
         let infoRect = CGRect(
             x: loupeRect.minX,

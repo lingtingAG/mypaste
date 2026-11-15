@@ -117,12 +117,33 @@ public enum ClipboardCard {
         ]
         let attributed = NSAttributedString(string: displayText, attributes: attributes)
         let contentMaxWidth: CGFloat = 560
-        let measured = attributed.boundingRect(
-            with: CGSize(width: contentMaxWidth, height: 1600),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
-        let contentWidth = max(180, min(contentMaxWidth, ceil(measured.width)))
-        let contentHeight = max(18, min(1600, ceil(measured.height)))
+        let maxContentHeight: CGFloat = 1600
+        func measure(_ string: NSAttributedString, width: CGFloat) -> CGRect {
+            string.boundingRect(
+                with: CGSize(width: width, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]
+            )
+        }
+        var body = attributed
+        // 先按最大宽度确定最终内容宽度，再用同一宽度测量/截断；否则短文本绘制时重排会超出按 560pt 算出的高度
+        let contentWidth = max(180, min(contentMaxWidth, ceil(measure(body, width: contentMaxWidth).width)))
+        if measure(body, width: contentWidth).height > maxContentHeight {
+            // 超高时按可容纳字符数截断并补省略号，避免底部文字被硬裁掉却无提示
+            var low = 0
+            var high = displayText.count
+            while low < high {
+                let mid = (low + high + 1) / 2
+                let candidate = NSAttributedString(string: String(displayText.prefix(mid)) + "…", attributes: attributes)
+                if measure(candidate, width: contentWidth).height <= maxContentHeight {
+                    low = mid
+                } else {
+                    high = mid - 1
+                }
+            }
+            body = NSAttributedString(string: String(displayText.prefix(low)) + "…", attributes: attributes)
+        }
+        let measured = measure(body, width: contentWidth)
+        let contentHeight = max(18, min(maxContentHeight, ceil(measured.height)))
         let padding = CGSize(width: 22, height: 20)
         let size = CGSize(
             width: max(220, contentWidth + padding.width * 2),
@@ -142,7 +163,7 @@ public enum ClipboardCard {
             NSColor(calibratedRed: 0.13, green: 0.55, blue: 0.95, alpha: 0.9).setFill()
             NSBezierPath(roundedRect: accent, xRadius: 1.5, yRadius: 1.5).fill()
 
-            attributed.draw(
+            body.draw(
                 with: NSRect(
                     x: padding.width,
                     y: padding.height,
@@ -218,7 +239,14 @@ public enum ClipboardCard {
         guard let r = component(parts[0]), let g = component(parts[1]), let b = component(parts[2]) else { return nil }
         var alpha = 1.0
         if parts.count == 4 {
-            if let a = Double(parts[3]) { alpha = min(max(a, 0), 1) }
+            let value = parts[3]
+            if value.hasSuffix("%") {
+                guard let number = Double(value.dropLast()) else { return nil }
+                alpha = min(max(number / 100, 0), 1)
+            } else {
+                guard let number = Double(value) else { return nil }
+                alpha = min(max(number, 0), 1)
+            }
         }
         return RGBAColor(red: r, green: g, blue: b, alpha: alpha)
     }

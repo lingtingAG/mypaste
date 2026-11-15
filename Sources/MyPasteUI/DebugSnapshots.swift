@@ -10,7 +10,9 @@ public enum DebugSnapshots {
         guard let desktop = makeDesktopImage(size: canvasSize, scale: 2) else {
             throw NSError(domain: "MyPasteSnapshots", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法生成桌面底图"])
         }
-        let screen = NSScreen.main ?? NSScreen.screens[0]
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+            throw NSError(domain: "MyPasteSnapshots", code: 2, userInfo: [NSLocalizedDescriptionKey: "没有可用显示器"])
+        }
         let captured = CapturedScreen(screen: screen, image: desktop, scale: 2)
         var outputs: [URL] = []
 
@@ -152,6 +154,7 @@ public enum DebugSnapshots {
         try renderPreferences(directory: directory, outputs: &outputs)
         try renderHistory(desktop: desktop, directory: directory, outputs: &outputs)
         try renderMenuBarIcon(directory: directory, outputs: &outputs)
+        try renderAppNotice(desktop: desktop, directory: directory, outputs: &outputs)
 
         return outputs
     }
@@ -361,6 +364,27 @@ public enum DebugSnapshots {
             )
         }) else { return }
         try write(image, name: "11-menubar-icon.png", to: directory, outputs: &outputs)
+    }
+
+    @MainActor
+    private static func renderAppNotice(desktop: CGImage, directory: URL, outputs: inout [URL]) throws {
+        guard let shot = AppNotice.snapshot(
+            title: "历史记录清理失败",
+            detail: "截图已保存，但清理旧历史记录失败：The file “MyPaste_20260115_101500.png” couldn’t be removed because it is open."
+        ) else { return }
+        let canvasSize = CGSize(width: 1440, height: 900)
+        guard let composed = OffscreenRenderer.render(size: canvasSize, scale: 2, draw: { context in
+            AnnotationRenderer.drawImageTopLeft(desktop, in: CGRect(origin: .zero, size: canvasSize), in: context)
+            // 提示条按 2x 渲染，按逻辑尺寸绘制到 2x 画布上正好 1:1 像素对应，不做缩放
+            let noticeRect = CGRect(
+                x: (canvasSize.width - shot.size.width) / 2,
+                y: 26,
+                width: shot.size.width,
+                height: shot.size.height
+            )
+            AnnotationRenderer.drawImageTopLeft(shot.image, in: noticeRect, in: context)
+        }) else { return }
+        try write(composed, name: "12-app-notice.png", to: directory, outputs: &outputs)
     }
 
     // MARK: - Rendering helpers
