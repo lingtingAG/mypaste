@@ -39,6 +39,13 @@ public final class PixelSampler {
         }
     }
 
+    /// 缓冲是否就绪（测试与调试用）：未调用 prepare() 时应始终为 false
+    public var isPrepared: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer != nil
+    }
+
     public func color(at point: CGPoint) -> RGBAColor? {
         // 先判负再截断：Int() 向零截断会让 -0.5 通过边界检查并误采样第 0 列
         guard point.x >= 0, point.y >= 0 else { return nil }

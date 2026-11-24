@@ -968,6 +968,97 @@ final class CoreTests: XCTestCase {
         XCTAssertThrowsError(try SecureFileWriter.ensurePrivateDirectory(at: dir))
     }
 
+    // MARK: - v1.2: space-saving writes, pixel buffer gate, pin limit
+
+    func testSpaceSavingWriterReusesSourceData() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("MyPasteSpace-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("history.png")
+        let destination = dir.appendingPathComponent("autosave.png")
+        let data = Data([0x89, 0x50, 0x4E, 0x47, 0x01, 0x02])
+        try SecureFileWriter.write(data, to: source)
+        try SpaceSavingWriter.copy(from: source, to: destination, fallbackData: data)
+        XCTAssertEqual(try Data(contentsOf: destination), data)
+        let perms = try XCTUnwrap(fm.attributesOfItem(atPath: destination.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(perms.intValue, 0o600)
+    }
+
+    func testSpaceSavingWriterFallsBackWhenSourceMissing() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("MyPasteSpace-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("gone.png")
+        let destination = dir.appendingPathComponent("autosave.png")
+        let data = Data([0x01, 0x02, 0x03])
+        try SpaceSavingWriter.copy(from: source, to: destination, fallbackData: data)
+        XCTAssertEqual(try Data(contentsOf: destination), data)
+        let perms = try XCTUnwrap(fm.attributesOfItem(atPath: destination.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(perms.intValue, 0o600)
+    }
+
+    func testSpaceSavingWriterFallsBackWhenSourceIsNil() throws {
+        // 历史写入失败时 entry == nil：自动保存必须独立写盘，保持改动前的语义
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("MyPasteSpace-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        let destination = dir.appendingPathComponent("autosave.png")
+        let data = Data([0x01, 0x02, 0x03])
+        try SpaceSavingWriter.copy(from: nil, to: destination, fallbackData: data)
+        XCTAssertEqual(try Data(contentsOf: destination), data)
+        let perms = try XCTUnwrap(fm.attributesOfItem(atPath: destination.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(perms.intValue, 0o600)
+    }
+
+    func testSpaceSavingWriterReplacesExistingDestination() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("MyPasteSpace-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("history.png")
+        let destination = dir.appendingPathComponent("autosave.png")
+        let data = Data([0x10, 0x20, 0x30])
+        try SecureFileWriter.write(Data([0x99, 0x99]), to: destination)
+        try SecureFileWriter.write(data, to: source)
+        try SpaceSavingWriter.copy(from: source, to: destination, fallbackData: data)
+        XCTAssertEqual(try Data(contentsOf: destination), data)
+    }
+
+    func testPixelSamplerOnlyBuildsBufferWhenPrepared() throws {
+        let image = try makeTestImage(width: 24, height: 16)
+        let sampler = PixelSampler(image: image)
+        let point = CGPoint(x: 7, y: 3)
+        XCTAssertFalse(sampler.isPrepared)
+        // 未预热时走单像素降级采样，且不应意外分配整屏缓冲
+        let fallback = try XCTUnwrap(sampler.color(at: point))
+        XCTAssertFalse(sampler.isPrepared)
+        sampler.prepare()
+        let deadline = Date().addingTimeInterval(2)
+        while !sampler.isPrepared, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertTrue(sampler.isPrepared)
+        let buffered = try XCTUnwrap(sampler.color(at: point))
+        XCTAssertEqual(fallback.red, buffered.red, accuracy: 0.03)
+        XCTAssertEqual(fallback.green, buffered.green, accuracy: 0.03)
+        XCTAssertEqual(fallback.blue, buffered.blue, accuracy: 0.03)
+    }
+
+    func testPinLimitSettingClamping() throws {
+        let suite = "com.mypaste.tests.settings"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertEqual(settings.pinLimit, 20)
+        settings.pinLimit = 1
+        XCTAssertEqual(settings.pinLimit, 5)
+        settings.pinLimit = 500
+        XCTAssertEqual(settings.pinLimit, 100)
+    }
+
     // MARK: - Helpers
 
     private func makeTestImage(width: Int, height: Int) throws -> CGImage {

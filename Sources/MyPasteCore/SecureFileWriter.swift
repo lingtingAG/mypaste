@@ -36,6 +36,11 @@ public enum SecureFileWriter {
         try apply(privateDirectoryPermissions, at: url)
     }
 
+    /// 非 write() 路径创建的文件（APFS 克隆 / 硬链接）统一收紧到 0600
+    public static func normalizeFilePermissions(at url: URL) throws {
+        try apply(privateFilePermissions, at: url)
+    }
+
     public static func write(_ data: Data, to url: URL) throws {
         try ensureDirectory(at: url.deletingLastPathComponent())
         // .atomic 先写临时文件再替换，不会留下半张截图；替换后立即收紧最终文件

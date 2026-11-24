@@ -257,16 +257,35 @@ public final class CaptureController {
                 }
                 return
             }
-            historyStore.record(image, pngData: png, onError: { error in
-                DispatchQueue.main.async {
-                    self?.presentArchiveError(error)
+            // PNG 自动保存可复用历史原图（clone / 硬链接），其余格式仍需按格式编码
+            let reuseHistoryFile = shouldAutoSave && format == .png
+            historyStore.record(
+                image,
+                pngData: png,
+                completion: { entry in
+                    guard reuseHistoryFile else { return }
+                    // completion 在主线程，文件操作必须再派回后台；
+                    // 历史写入失败时 entry == nil，copy 会退回普通写，自动保存不受牵连
+                    DispatchQueue.global(qos: .utility).async {
+                        do {
+                            try SpaceSavingWriter.copy(from: entry?.url, to: url, fallbackData: png)
+                        } catch {
+                            DispatchQueue.main.async { self?.presentArchiveError(error) }
+                        }
+                    }
+                },
+                onError: { error in
+                    DispatchQueue.main.async {
+                        self?.presentArchiveError(error)
+                    }
+                },
+                onPruneError: { error in
+                    DispatchQueue.main.async {
+                        self?.presentHistoryPruneError(error)
+                    }
                 }
-            }, onPruneError: { error in
-                DispatchQueue.main.async {
-                    self?.presentHistoryPruneError(error)
-                }
-            })
-            guard shouldAutoSave else { return }
+            )
+            guard shouldAutoSave, !reuseHistoryFile else { return }
             do {
                 let data: Data
                 if format == .png {

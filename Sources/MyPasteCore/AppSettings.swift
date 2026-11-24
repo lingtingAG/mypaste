@@ -20,6 +20,7 @@ public final class AppSettings {
             prefix + "toolColor": RGBAColor.red.hexString,
             prefix + "saveFormat": SaveFormat.png.rawValue,
             prefix + "jpegQuality": 0.92,
+            prefix + "pinLimit": 20,
         ])
     }
 
@@ -127,6 +128,12 @@ public final class AppSettings {
     private static let rememberedTools: [Tool] = [
         .rectangle, .ellipse, .arrow, .pen, .marker, .mosaic, .blur, .number, .eraser
     ]
+
+    /// 同时常驻的贴图数量上限，超过时自动关闭最早的一张（每张持有全分辨率 CGImage）
+    public var pinLimit: Int {
+        get { max(5, min(100, defaults.integer(forKey: prefix + "pinLimit"))) }
+        set { set(max(5, min(100, newValue)), key: "pinLimit") }
+    }
 
     public var saveDirectory: URL {
         get {

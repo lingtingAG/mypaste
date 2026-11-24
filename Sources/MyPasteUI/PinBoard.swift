@@ -77,6 +77,17 @@ public final class PinBoard {
         controller.onCloseRequested = { [weak self] pin in
             self?.pins.removeAll { $0 === pin }
         }
+        // 每张 pin 都持有全分辨率 CGImage，超过上限先淘汰最早的一张
+        let limit = AppSettings.shared.pinLimit
+        if pins.count >= limit, let oldest = pins.first {
+            oldest.closePin()
+            AppNotice.show(
+                title: "贴图数量已达上限",
+                detail: "已自动关闭最早的一张贴图（上限 \(limit) 张）。",
+                duration: 2.5,
+                dedupe: false
+            )
+        }
         pins.append(controller)
         controller.show()
         return controller

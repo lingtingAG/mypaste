@@ -1,10 +1,8 @@
 # MyPaste
 
-一个从零实现的原生 macOS 截图、标注与贴图工具。工作流参考 [Snipaste](https://zh.snipaste.com/)，核心截图、取色、标注、贴图、历史记录流程已对齐；使用 Swift + AppKit + ScreenCaptureKit，无 Electron、无 Web 运行时、无第三方依赖。
+一个从零实现的原生 macOS 截图、标注与贴图工具，覆盖截图、取色、标注、贴图与历史记录流程；使用 Swift + AppKit + ScreenCaptureKit，无 Electron、无 Web 运行时、无第三方依赖。
 
 常驻菜单栏，按 **F1 截图**，按 **F3 贴图**。
-
-![截图编辑器](docs/snapshots/02-overlay-editor.png)
 
 ## 功能
 
@@ -111,14 +109,14 @@
 
 本机实测（macOS 27.0.1，arm64，内置显示器 3840×2560 / 1920×1280pt）：
 
-| 指标 | MyPaste 1.0.0 | Snipaste 2.8.3 |
-| --- | ---: | ---: |
-| 空闲常驻内存 RSS | 71.4 MB（73,104 KB） | 124.0 MB（127,024 KB） |
-| 空闲 CPU | 0.0% | 0.0% |
-| 应用体积 | 2.6 MB | 88 MB |
-| 运行时依赖 | 系统 AppKit / ScreenCaptureKit | 自带 Qt 等 |
+| 指标 | 实测值 |
+| --- | ---: |
+| 空闲常驻内存 RSS | 71.4 MB（73,104 KB） |
+| 空闲 CPU | 0.0% |
+| 应用体积 | 2.6 MB |
+| 运行时依赖 | 系统 AppKit / ScreenCaptureKit |
 
-测量方法：两个应用均只常驻菜单栏、无可见窗口，启动完成数秒后执行 `ps -o rss`。RSS 包含共享内存页，因此只用于相对比较。相对 Snipaste，常驻 RSS 约低 42%，应用体积约小 97%。
+测量方法：应用只常驻菜单栏、无可见窗口，启动完成数秒后执行 `ps -o rss`。RSS 包含共享内存页，因此只用于相对比较。
 
 实现上的开销控制：
 
@@ -168,7 +166,7 @@ swift test
 swift run MyPasteSnapshots docs/snapshots
 ```
 
-- `swift test`：54 个核心测试 + 36 个 UI 交互测试（含会话生命周期、提示条快照、v1.1 回归与超时竞态），共 90 个，全部通过。
+- `swift test`：60 个核心测试 + 40 个 UI 交互测试（含会话生命周期、提示条快照、v1.1 回归与超时竞态、v1.2 性能与存储回归），共 100 个，全部通过。
 - `swift run MyPasteSnapshots docs/snapshots`：离屏渲染 13 张 UI 预览（含合成结果与提示条），不弹出窗口，也不需要屏幕录制权限。
 - 调试时也可通过 URL 动作：
 
@@ -203,7 +201,7 @@ open 'mypaste://quit'
 
 - `/Applications/MyPaste.app` 获得系统“屏幕录制”授权后，全屏截图成功：剪贴板收到 3840×2560 PNG，历史目录写入原图与缩略图。
 - 区域截图覆盖层实际出现：1920×1280 pt、窗口层级 1000 的全屏覆盖窗口；切换到其他应用后按设计自动取消。
-- 全屏截图和区域覆盖层使用同一套 `ScreenCaptureKit` 采集结果；编辑器内的选区、标注、撤销、文字输入与导出合成覆盖于 24 个画布交互测试，另有会话生命周期、提示条、v1.1 回归与超时竞态测试。
+- 全屏截图和区域覆盖层使用同一套 `ScreenCaptureKit` 采集结果；编辑器内的选区、标注、撤销、文字输入与导出合成覆盖于 24 个画布交互测试，另有会话生命周期、提示条、v1.1 回归、超时竞态与 v1.2 性能 / 存储测试。
 - 测试产生的真实屏幕截图与剪贴板内容已在验证后清理，未保留用户屏幕内容。
 
 仍建议用户按下面清单做一次人工交互验收（自动化进程无法代替鼠标授权/点击）：
@@ -218,17 +216,7 @@ open 'mypaste://quit'
 - [ ] 在设置中修改快捷键后无需重启即可生效。
 - [ ] 在设置里录制当前已注册的组合（如 `F1`）时不会触发截图，保存后新快捷键立即生效。
 
-## 与 Snipaste 的差异
-
-已实现的核心工作流：
-
-- 截图（区域 / 窗口 / 全屏）、冻结屏幕、放大镜、像素取色。
-- 截图标注工具齐全，撤销 / 重做、颜色 / 粗细 / 填充。
-- 图像 / 文本 / 颜色贴图，缩放、透明度、置顶、多贴图管理。
-- 历史记录、可配置全局快捷键、开机启动、自动保存。
-- 菜单栏常驻，占用低。
-
-当前版本未实现：
+## 当前版本未实现
 
 - 非文字标注创建后的再次选择 / 修改属性（文字标注已支持选中移动、双击编辑、改字号与颜色）。
 - 跨显示器的一次性选区（每块屏幕单独选择）。
@@ -295,20 +283,3 @@ Resources/
 - 历史原图、缩略图与自动保存文件按 `0600`、历史目录按 `0700` 落盘。
 - 屏幕内容只在内存中处理，会话结束后释放；历史文件需用户主动删除或设置上限。
 - 剪贴板读写仅在用户触发截图 / 贴图时发生；外部应用通过 `mypaste://` 触发的敏感动作会先弹确认框，且不会自动保存到文件夹。
-
-## 预览
-
-| | |
-| --- | --- |
-| ![窗口检测与放大镜](docs/snapshots/01-overlay-hover.png) | ![取色器](docs/snapshots/03-overlay-colorpicker.png) |
-| ![文字输入与字号调整](docs/snapshots/10-text-editor.png) | ![导出合成](docs/snapshots/04-composition.png) |
-| ![菜单栏模板图标](docs/snapshots/11-menubar-icon.png) | ![颜色贴图](docs/snapshots/06-card-color.png) |
-| ![贴图窗口](docs/snapshots/07-pin.png) | ![历史记录](docs/snapshots/09-history.png) |
-| ![设置](docs/snapshots/08-preferences.png) | ![文本贴图](docs/snapshots/05-card-text.png) |
-| ![非模态提示条](docs/snapshots/12-app-notice.png) | 历史清理失败等后台错误的非模态提示 |
-
-更多预览见 [`docs/snapshots`](docs/snapshots)。
-
----
-
-MyPaste 是独立实现，不包含 Snipaste 的任何代码或资源。Snipaste 是其各自权利人的产品。

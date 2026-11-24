@@ -182,6 +182,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     }
 
     public override func mouseMoved(with event: NSEvent) {
+        let previous = cursorPoint
         let point = convert(event.locationInWindow, from: nil)
         cursorPoint = point
         if mode == .colorPicker {
@@ -189,8 +190,15 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             return
         }
         if selection == nil {
+            let previousHighlight = hoveredWindow?.localRect
             refreshHoveredWindow(at: point)
-            needsDisplay = true
+            // 窗口高亮整块变化时 refreshHoveredWindow 已请求整屏重绘；
+            // 其余情况只标脏旧/新光标的十字线与放大镜区域
+            if previousHighlight == hoveredWindow?.localRect {
+                for rect in cursorDirtyRects(old: previous, new: point) {
+                    setNeedsDisplay(rect)
+                }
+            }
         } else if case .drawing = dragState {
             needsDisplay = true
         }
@@ -1034,9 +1042,16 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
 
     // MARK: - Color
 
+    // 取色器模式的放大镜无条件显示；edit 模式只有开启放大镜时才需要整屏像素缓冲。
+    // 关闭放大镜时 C 键取色走 PixelSampler 的单像素降级采样，不必分配整屏 RGBA 拷贝。
+    var shouldPreparePixelBuffer: Bool {
+        mode == .colorPicker || AppSettings.shared.showMagnifier
+    }
+
     private func pixelColor(at localPoint: CGPoint) -> RGBAColor? {
-        // 预热后台像素缓冲：放大镜、C 键取色、取色器共用此入口，关闭放大镜时同样走缓冲
-        pixelSampler.prepare()
+        if shouldPreparePixelBuffer {
+            pixelSampler.prepare()
+        }
         let imagePoint = CGPoint(
             x: floor(min(max(localPoint.x, 0), bounds.width - 0.001) * captured.scale),
             y: floor(min(max(localPoint.y, 0), bounds.height - 0.001) * captured.scale)
@@ -1543,6 +1558,40 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         context.restoreGState()
     }
 
+    /// 放大镜与信息条的联合区域：绘制与局部重绘脏区共用同一套几何，避免常量漂移留下残影。
+    static func magnifierUnionRect(for cursor: CGPoint, in size: CGSize) -> CGRect {
+        let loupeSize = CGSize(width: 126, height: 126)
+        let infoHeight: CGFloat = 38
+        let offset: CGFloat = 24
+        var origin = CGPoint(x: cursor.x + offset, y: cursor.y + offset)
+        if origin.x + loupeSize.width + 8 > size.width {
+            origin.x = cursor.x - offset - loupeSize.width
+        }
+        let totalHeight = loupeSize.height + 6 + infoHeight
+        if origin.y + totalHeight + 8 > size.height {
+            origin.y = cursor.y - offset - totalHeight
+        }
+        origin.x = min(max(8, origin.x), size.width - loupeSize.width - 8)
+        origin.y = min(max(8, origin.y), size.height - totalHeight - 8)
+        return CGRect(x: origin.x, y: origin.y, width: loupeSize.width, height: totalHeight)
+    }
+
+    /// 十字线横贯全屏，脏区必须包含旧 / 新光标的整行整列；放大镜叠加精确联合区域。
+    /// AppKit 会把 draw(_:) 裁剪到这些 rect，绘制逻辑无需改动。
+    func cursorDirtyRects(old: CGPoint?, new: CGPoint) -> [CGRect] {
+        let band: CGFloat = 3
+        var rects: [CGRect] = []
+        for point in ([old, new] as [CGPoint?]).compactMap({ $0 }) {
+            rects.append(CGRect(x: point.x - band / 2, y: 0, width: band, height: bounds.height))
+            rects.append(CGRect(x: 0, y: point.y - band / 2, width: bounds.width, height: band))
+            if AppSettings.shared.showMagnifier {
+                // 放大镜外描边 lineWidth 2，脏区外扩 2pt
+                rects.append(Self.magnifierUnionRect(for: point, in: bounds.size).insetBy(dx: -2, dy: -2))
+            }
+        }
+        return rects.map { $0.intersection(bounds) }.filter { !$0.isNull }
+    }
+
     private func drawMagnifier(at cursor: CGPoint, in context: CGContext) {
         let scale = captured.scale
         let image = captured.image
@@ -1566,19 +1615,11 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         sourceRect.origin.y = min(max(0, sourceRect.minY), imageHeight - sourceRect.height)
         guard let crop = image.cropping(to: sourceRect) else { return }
 
-        let loupeSize = CGSize(width: 126, height: 126)
-        let infoHeight: CGFloat = 38
-        let offset: CGFloat = 24
-        var origin = CGPoint(x: cursor.x + offset, y: cursor.y + offset)
-        if origin.x + loupeSize.width + 8 > bounds.maxX {
-            origin.x = cursor.x - offset - loupeSize.width
-        }
-        let totalHeight = loupeSize.height + 6 + infoHeight
-        if origin.y + totalHeight + 8 > bounds.maxY {
-            origin.y = cursor.y - offset - totalHeight
-        }
-        origin.x = min(max(8, origin.x), bounds.maxX - loupeSize.width - 8)
-        origin.y = min(max(8, origin.y), bounds.maxY - totalHeight - 8)
+        // 几何与局部重绘脏区共用 magnifierUnionRect，避免两处常量漂移
+        let union = Self.magnifierUnionRect(for: cursor, in: bounds.size)
+        let origin = union.origin
+        let loupeSize = CGSize(width: union.width, height: 126)
+        let infoHeight = union.height - loupeSize.height - 6
         let loupeRect = CGRect(origin: origin, size: loupeSize)
 
         context.saveGState()

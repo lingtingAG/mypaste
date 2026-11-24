@@ -34,6 +34,9 @@ private final class PinContentView: NSView {
     private var trackingAreaRef: NSTrackingArea?
     private var hudText: String?
     private var hudWorkItem: DispatchWorkItem?
+    // 连续缩放期间不重绘整图，由 WindowServer 拉伸已有 backing store
+    fileprivate var isInteractivelyResizing = false
+    private var highQualityRedraw: DispatchWorkItem?
     private(set) var alwaysOnTop = true
 
     private let handleSize: CGFloat = 7
@@ -74,7 +77,7 @@ private final class PinContentView: NSView {
         path.fill()
         context.saveGState()
         path.addClip()
-        context.interpolationQuality = .high
+        context.interpolationQuality = isInteractivelyResizing ? .none : .high
         AnnotationRenderer.drawImageTopLeft(image, in: bounds, in: context)
         context.restoreGState()
 
@@ -114,6 +117,30 @@ private final class PinContentView: NSView {
                 withAttributes: attributes
             )
         }
+    }
+
+    /// 拖拽 / 滚轮连续缩放时只改窗口 frame：`display: false` 跳过立即绘制，
+    /// `layerContentsRedrawPolicy = .never` 阻止 AppKit 在 resize 时标脏重绘 layer contents
+    /// （默认 `.duringViewResize` 仍会在下一 runloop 触发 draw）。
+    /// 停止 120ms 或松手后恢复策略并补一次 `.high` 高质量重绘，静止画面不失真。
+    fileprivate func setInteractiveFrame(_ frame: CGRect) {
+        isInteractivelyResizing = true
+        layerContentsRedrawPolicy = .never
+        window?.setFrame(frame, display: false)
+        highQualityRedraw?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.finishInteractiveResize()
+        }
+        highQualityRedraw = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func finishInteractiveResize() {
+        highQualityRedraw?.cancel()
+        highQualityRedraw = nil
+        isInteractivelyResizing = false
+        layerContentsRedrawPolicy = .duringViewResize
+        needsDisplay = true
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -179,7 +206,7 @@ private final class PinContentView: NSView {
             case .topLeft:
                 origin = CGPoint(x: initialFrame.maxX - newWidth, y: initialFrame.minY)
             }
-            window?.setFrame(CGRect(x: origin.x, y: origin.y, width: newWidth, height: newHeight), display: true)
+            setInteractiveFrame(CGRect(x: origin.x, y: origin.y, width: newWidth, height: newHeight))
 
         case .none:
             break
@@ -188,6 +215,7 @@ private final class PinContentView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         dragState = .none
+        if isInteractivelyResizing { finishInteractiveResize() }
         updateCursor(at: convert(event.locationInWindow, from: nil))
     }
 
@@ -214,7 +242,7 @@ private final class PinContentView: NSView {
             x: mouse.x - anchorX * newWidth,
             y: mouse.y - anchorY * newHeight
         )
-        window.setFrame(CGRect(x: origin.x, y: origin.y, width: newWidth, height: newHeight), display: true)
+        setInteractiveFrame(CGRect(x: origin.x, y: origin.y, width: newWidth, height: newHeight))
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -531,6 +559,13 @@ public final class PinWindowController: NSWindowController, NSWindowDelegate {
     public private(set) var image: CGImage
     public let initialDisplaySize: CGSize
     public let originalText: String?
+    /// 调试 / 测试用：连续缩放期间不做高质量整图重绘
+    var isInteractivelyResizing: Bool { content.isInteractivelyResizing }
+
+    /// 调试 / 测试用：走与滚轮 / 拖拽缩放相同的帧更新路径
+    func resizeInteractively(to frame: CGRect) {
+        content.setInteractiveFrame(frame)
+    }
     var onCloseRequested: ((PinWindowController) -> Void)?
     var onHideRequested: ((PinWindowController) -> Void)?
     private var didRequestClose = false
