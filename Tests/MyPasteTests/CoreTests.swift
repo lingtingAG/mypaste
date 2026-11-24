@@ -451,6 +451,48 @@ final class CoreTests: XCTestCase {
         XCTAssertLessThan(jpegData.count, pngData.count / 2, "JPEG 缩略图应显著小于 PNG")
     }
 
+    func testHistorySweepRemovesOrphanThumbnail() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+        let entry = try store.recordSync(image, limit: 10)
+        // 手工制造孤儿：原图删掉，只留缩略图
+        try FileManager.default.removeItem(at: entry.url)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entry.thumbnailURL.path))
+
+        try store.sweepOrphanThumbnails()
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: entry.thumbnailURL.path),
+            "没有对应原图的孤儿缩略图应被回收"
+        )
+    }
+
+    func testHistoryClearReportsDeletionFailureAndRemovesOrphans() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+        let entry = try store.recordSync(image, limit: 10)
+        // 孤儿：只留缩略图
+        try FileManager.default.removeItem(at: entry.url)
+        // 不可变标记让一个文件删不掉：clear 必须上报失败而不是静默
+        let blocker = root.appendingPathComponent("blocker.png")
+        try Data([0x00]).write(to: blocker)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: blocker.path)
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: blocker.path)
+        }
+
+        let failed = expectation(description: "clear error")
+        store.clear(onError: { _ in failed.fulfill() })
+        wait(for: [failed], timeout: 5)
+        // 清理失败也要走孤儿回收：可删的孤儿缩略图不能留下
+        XCTAssertFalse(FileManager.default.fileExists(atPath: entry.thumbnailURL.path))
+    }
+
     func testHistoryDeleteAndClearAreAsyncAndConsistent() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
@@ -1063,6 +1105,9 @@ final class CoreTests: XCTestCase {
         let point = CGPoint(x: 7, y: 3)
         // v1.3：按需单像素采样，常驻缓冲固定 1 像素，不再随源图尺寸增长
         XCTAssertEqual(sampler.residentPixelCount, 1)
+        // 查询状态不得改变状态：isPrepared 必须是纯读，不能顺带创建上下文
+        XCTAssertFalse(sampler.isPrepared)
+        XCTAssertFalse(sampler.isPrepared, "重复查询不应创建采样上下文")
         // 未 prepare 时也必须能正确取色（采样按需进行，不依赖后台预热）
         let sampled = try XCTUnwrap(sampler.color(at: point))
         XCTAssertTrue(sampler.isPrepared)

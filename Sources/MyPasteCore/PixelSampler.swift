@@ -33,11 +33,13 @@ public final class PixelSampler {
         _ = samplingContextLocked()
     }
 
-    /// 采样上下文是否就绪（测试与调试用）
+    /// 采样上下文是否已创建（测试与调试用）。
+    /// 纯查询：不能顺带创建上下文，否则"查状态"会改变状态，
+    /// 后续 `XCTAssertFalse(isPrepared)` 之类的断言会被自己踩坑。
     public var isPrepared: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return samplingContextLocked() != nil
+        return context != nil
     }
 
     /// 常驻采样缓冲的像素数：按需采样固定为 1，与源图尺寸无关。

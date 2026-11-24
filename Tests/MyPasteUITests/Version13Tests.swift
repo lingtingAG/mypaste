@@ -174,6 +174,15 @@ final class Version13Tests: XCTestCase {
             encoded: EncodedCapture(data: Data([0x01, 0x02]), fileExtension: "jpg")
         )
         XCTAssertNil(jpegResult.reusablePNGData)
+        // 扩展名是 png 但内容不是 PNG：签名校验必须拦下
+        let forgedResult = CaptureResult(
+            image: image,
+            screen: screen,
+            screenRect: .zero,
+            scale: 2,
+            encoded: EncodedCapture(data: Data([0x01, 0x02, 0x03, 0x04]), fileExtension: "png")
+        )
+        XCTAssertNil(forgedResult.reusablePNGData, "扩展名与内容不符的数据不能当作历史库原图")
         // 未保存过的结果没有可复用数据
         let plainResult = CaptureResult(image: image, screen: screen, screenRect: .zero, scale: 2)
         XCTAssertNil(plainResult.reusablePNGData)

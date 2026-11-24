@@ -170,7 +170,7 @@ swift test
 swift run MyPasteSnapshots docs/snapshots
 ```
 
-- `swift test`：61 个核心测试 + 44 个 UI 交互测试（含会话生命周期、提示条快照、v1.1 回归与超时竞态、v1.2 / v1.3 性能与存储回归），共 105 个，全部通过。
+- `swift test`：63 个核心测试 + 44 个 UI 交互测试（含会话生命周期、提示条快照、v1.1 回归与超时竞态、v1.2 / v1.3 性能与存储回归），共 107 个，全部通过。
 - `swift run MyPasteSnapshots docs/snapshots`：离屏渲染 13 张 UI 预览（含合成结果与提示条），不弹出窗口，也不需要屏幕录制权限。
 - 调试时也可通过 URL 动作：
 

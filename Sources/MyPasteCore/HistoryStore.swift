@@ -279,11 +279,46 @@ public final class HistoryStore: @unchecked Sendable {
             } catch {
                 if !Self.isMissingFile(error) { firstError = error }
             }
+            // clear 不走 pruneOnQueue，这里补一次孤儿回收：
+            // 上一轮删除失败留下的"原图已删、缩略图残留"在此重试清理
+            if let error = self.sweepOrphanThumbnailsOnQueue(), firstError == nil {
+                firstError = error
+            }
             DispatchQueue.main.async {
                 if let firstError { onError?(firstError) }
                 NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
             }
         }
+    }
+
+    /// 回收孤儿缩略图：没有对应原图的缩略图残留。
+    /// 走内部队列串行化；供清理流程与测试调用。
+    public func sweepOrphanThumbnails() throws {
+        try queue.sync {
+            if let error = sweepOrphanThumbnailsOnQueue() { throw error }
+        }
+    }
+
+    /// 清理没有对应原图的孤儿缩略图（原图已删、缩略图删除失败的残留）。
+    /// 返回第一个错误；调用方需在队列内调用。
+    private func sweepOrphanThumbnailsOnQueue() -> Error? {
+        var firstError: Error?
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        let suffixes = ["_thumb." + Self.thumbnailFileExtension, "_thumb." + Self.legacyThumbnailFileExtension]
+        for url in urls {
+            guard let suffix = suffixes.first(where: { url.lastPathComponent.hasSuffix($0) }) else { continue }
+            let base = String(url.lastPathComponent.dropLast(suffix.count))
+            let mainURL = rootURL.appendingPathComponent(base + ".png")
+            guard !FileManager.default.fileExists(atPath: mainURL.path) else { continue }
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                if !Self.isMissingFile(error), firstError == nil { firstError = error }
+            }
+        }
+        return firstError
     }
 
     /// 按条数与磁盘字节双重上限清理，从最旧开始删除，至少保留最新一条。
@@ -325,19 +360,8 @@ public final class HistoryStore: @unchecked Sendable {
         // 清理没有对应原图的孤儿缩略图（原图已删、缩略图删除失败的残留）。
         // 只在本轮确实删过文件时才做这次额外的目录扫描：孤儿本就产生于删除失败，
         // 每次写入都全量扫描目录没有必要（实测 50 条约 3.5ms）
-        if didRemove, let urls = try? FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil) {
-            let suffixes = ["_thumb." + Self.thumbnailFileExtension, "_thumb." + Self.legacyThumbnailFileExtension]
-            for url in urls {
-                guard let suffix = suffixes.first(where: { url.lastPathComponent.hasSuffix($0) }) else { continue }
-                let base = String(url.lastPathComponent.dropLast(suffix.count))
-                let mainURL = rootURL.appendingPathComponent(base + ".png")
-                guard !FileManager.default.fileExists(atPath: mainURL.path) else { continue }
-                do {
-                    try FileManager.default.removeItem(at: url)
-                } catch {
-                    if !Self.isMissingFile(error), firstError == nil { firstError = error }
-                }
-            }
+        if didRemove, let error = sweepOrphanThumbnailsOnQueue(), firstError == nil {
+            firstError = error
         }
         if let firstError { throw firstError }
     }

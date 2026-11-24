@@ -38,12 +38,18 @@ public struct CaptureResult {
         self.encoded = encoded
     }
 
-    /// 可直接作为历史库 PNG 复用的数据（仅 PNG 格式内容一致）
+    /// 可直接作为历史库 PNG 复用的数据（仅 PNG 格式内容一致）。
+    /// 除扩展名外再校验 PNG 文件签名：扩展名与内容不符的数据不能当作原图入库。
     public var reusablePNGData: Data? {
         guard let encoded, encoded.fileExtension.lowercased() == "png" else { return nil }
+        guard encoded.data.count >= pngSignature.count,
+              Array(encoded.data.prefix(pngSignature.count)) == pngSignature else { return nil }
         return encoded.data
     }
 }
+
+/// PNG 文件签名（8 字节）
+private let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
 
 public final class CaptureSession {
     public struct Callbacks {
