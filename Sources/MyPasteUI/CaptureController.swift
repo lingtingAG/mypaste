@@ -249,13 +249,21 @@ public final class CaptureController {
             ImageExporter.timestampedFileName(fileExtension: format.fileExtension)
         )
         let image = result.image
+        // 保存路径已写盘的 PNG 直接复用：整图二次编码在 5K 屏上约 0.4~1.5s
+        let reusablePNG = result.reusablePNGData
         DispatchQueue.global(qos: .utility).async { [weak self] in
             // PNG 只编码一次，历史记录与自动保存复用同一份数据
-            guard let png = ImageExporter.pngData(image) else {
-                DispatchQueue.main.async {
-                    self?.presentArchiveError(ImageExporter.ExportError.encodingFailed)
+            let png: Data
+            if let reusablePNG {
+                png = reusablePNG
+            } else {
+                guard let encoded = ImageExporter.pngData(image) else {
+                    DispatchQueue.main.async {
+                        self?.presentArchiveError(ImageExporter.ExportError.encodingFailed)
+                    }
+                    return
                 }
-                return
+                png = encoded
             }
             // PNG 自动保存可复用历史原图（clone / 硬链接），其余格式仍需按格式编码
             let reuseHistoryFile = shouldAutoSave && format == .png

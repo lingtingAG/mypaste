@@ -62,7 +62,9 @@ public enum ImageExporter {
 
     private static let supportedExtensions: Set<String> = ["png", "jpg", "jpeg", "tif", "tiff"]
 
-    public static func write(_ image: CGImage, to url: URL, jpegQuality: CGFloat = 0.92) throws {
+    /// 编码并写盘；返回已编码的数据，调用方可复用同一份字节（避免重复编码整图）
+    @discardableResult
+    public static func write(_ image: CGImage, to url: URL, jpegQuality: CGFloat = 0.92) throws -> Data {
         let ext = url.pathExtension.isEmpty ? "png" : url.pathExtension.lowercased()
         // 扩展名与编码格式必须一致，未知格式显式报错而不是写出内容不符的文件
         guard supportedExtensions.contains(ext) else {
@@ -72,6 +74,7 @@ public enum ImageExporter {
             throw ExportError.encodingFailed
         }
         try SecureFileWriter.write(data, to: url)
+        return data
     }
 
     // DateFormatter 创建开销高且非线程安全，静态复用并加锁

@@ -421,6 +421,36 @@ final class CoreTests: XCTestCase {
         }
     }
 
+    func testHistoryThumbnailIsJPEGAndSmallerThanPNG() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        // 带噪点的图才能体现 PNG 与 JPEG 的体积差异
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+        let entry = try store.recordSync(image, limit: 10)
+
+        XCTAssertEqual(
+            entry.thumbnailURL.pathExtension.lowercased(),
+            "jpg",
+            "缩略图改用 JPEG 落盘"
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entry.thumbnailURL.path))
+
+        // 缩略图长边不超过上限：卡片显示区 2x 下也只需 392px
+        let thumb = try XCTUnwrap(NSImage(contentsOf: entry.thumbnailURL))
+        XCTAssertLessThanOrEqual(
+            max(thumb.size.width, thumb.size.height),
+            HistoryStore.thumbnailMaxPixel + 0.5
+        )
+
+        // 同尺寸 PNG 缩略图明显更大：这就是本项省下的磁盘空间
+        let pixel = try XCTUnwrap(HistoryStore.makeThumbnail(image, maxPixel: HistoryStore.thumbnailMaxPixel))
+        let pngData = try XCTUnwrap(ImageExporter.pngData(pixel))
+        let jpegData = try Data(contentsOf: entry.thumbnailURL)
+        XCTAssertLessThan(jpegData.count, pngData.count / 2, "JPEG 缩略图应显著小于 PNG")
+    }
+
     func testHistoryDeleteAndClearAreAsyncAndConsistent() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
@@ -1027,24 +1057,26 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), data)
     }
 
-    func testPixelSamplerOnlyBuildsBufferWhenPrepared() throws {
+    func testPixelSamplerSamplesWithoutFullScreenBuffer() throws {
         let image = try makeTestImage(width: 24, height: 16)
         let sampler = PixelSampler(image: image)
         let point = CGPoint(x: 7, y: 3)
-        XCTAssertFalse(sampler.isPrepared)
-        // 未预热时走单像素降级采样，且不应意外分配整屏缓冲
-        let fallback = try XCTUnwrap(sampler.color(at: point))
-        XCTAssertFalse(sampler.isPrepared)
-        sampler.prepare()
-        let deadline = Date().addingTimeInterval(2)
-        while !sampler.isPrepared, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
+        // v1.3：按需单像素采样，常驻缓冲固定 1 像素，不再随源图尺寸增长
+        XCTAssertEqual(sampler.residentPixelCount, 1)
+        // 未 prepare 时也必须能正确取色（采样按需进行，不依赖后台预热）
+        let sampled = try XCTUnwrap(sampler.color(at: point))
         XCTAssertTrue(sampler.isPrepared)
-        let buffered = try XCTUnwrap(sampler.color(at: point))
-        XCTAssertEqual(fallback.red, buffered.red, accuracy: 0.03)
-        XCTAssertEqual(fallback.green, buffered.green, accuracy: 0.03)
-        XCTAssertEqual(fallback.blue, buffered.blue, accuracy: 0.03)
+        // 与参考实现（单像素裁剪采样）一致
+        let reference = try XCTUnwrap(AnnotationRenderer.averageColor(of: image, at: point))
+        XCTAssertEqual(sampled.red, reference.red, accuracy: 0.01)
+        XCTAssertEqual(sampled.green, reference.green, accuracy: 0.01)
+        XCTAssertEqual(sampled.blue, reference.blue, accuracy: 0.01)
+        // prepare 幂等，结果不漂移
+        sampler.prepare()
+        let afterPrepare = try XCTUnwrap(sampler.color(at: point))
+        XCTAssertEqual(afterPrepare.red, sampled.red, accuracy: 0.01)
+        XCTAssertEqual(afterPrepare.green, sampled.green, accuracy: 0.01)
+        XCTAssertEqual(afterPrepare.blue, sampled.blue, accuracy: 0.01)
     }
 
     func testPinLimitSettingClamping() throws {
@@ -1086,6 +1118,39 @@ final class CoreTests: XCTestCase {
                 width: width / 9,
                 height: height / 3
             ))
+        }
+        return try XCTUnwrap(context.makeImage())
+    }
+
+    /// 带随机噪点的测试图：真实截图有高频细节，压缩率才接近实际
+    private func makeNoisyTestImage(width: Int, height: Int) throws -> CGImage {
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        var seed: UInt64 = 0x2545F4914F6CDD1D
+        func next() -> Double {
+            seed ^= seed << 13
+            seed ^= seed >> 7
+            seed ^= seed << 17
+            return Double(seed % 1000) / 1000.0
+        }
+        for y in 0..<height {
+            for x in 0..<width {
+                let value = next()
+                context.setFillColor(NSColor(
+                    calibratedRed: value,
+                    green: 1 - value,
+                    blue: next(),
+                    alpha: 1
+                ).cgColor)
+                context.fill(CGRect(x: x, y: y, width: 1, height: 1))
+            }
         }
         return try XCTUnwrap(context.makeImage())
     }

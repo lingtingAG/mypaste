@@ -62,12 +62,21 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
 
     private(set) var selection: CGRect?
     private(set) var annotations: [Annotation] = [] {
-        didSet { annotationCache = nil }
+        didSet {
+            annotationCache = nil
+            annotationCacheTail = nil
+        }
     }
     private var annotationCache: AnnotationCache?
+    // 拖动中的文字把已提交标注切成前后两段分别缓存，保证层叠顺序与提交后一致
+    private var annotationCacheTail: AnnotationCache?
+    // 标注位图层实际重建次数（回归测试用）：拖动文字 / 移动选区不应逐帧重建整图
+    private(set) var annotationLayerRenderCount = 0
+    // 拖动中的文字：拖动过程不改动 annotations，避免每个鼠标事件重建标注位图
+    private var movingTextOverlay: Annotation?
     // 会话级效果缓存：生命周期与画布/源图一致，避免跨会话串用与跨线程共享
     private let effectCache = AnnotationEffectCache()
-    private lazy var pixelSampler = PixelSampler(image: captured.image)
+    lazy var pixelSampler = PixelSampler(image: captured.image)
     private var undoStack: [[Annotation]] = []
     private var redoStack: [[Annotation]] = []
     private var currentAnnotation: Annotation?
@@ -268,6 +277,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
                 }
                 dragState = .movingText(id: hit.id, start: point, initialOrigin: origin)
                 movingTextSnapshot = annotations
+                movingTextOverlay = nil
                 movingTextDidChange = false
                 updateCursor(at: point)
             }
@@ -345,7 +355,10 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             var origin = CGPoint(x: initialOrigin.x + delta.x, y: initialOrigin.y + delta.y)
             origin.x = min(max(0, origin.x), max(0, selection.width - textSize.width))
             origin.y = min(max(0, origin.y), max(0, selection.height - textSize.height))
-            annotations[index].kind = .text(origin: origin, string: string, fontSize: fontSize)
+            // 拖动过程只更新覆盖层，不改动已提交集合：否则每个鼠标事件都会让标注位图整张重建
+            var overlay = annotations[index]
+            overlay.kind = .text(origin: origin, string: string, fontSize: fontSize)
+            movingTextOverlay = overlay
             if hypot(delta.x, delta.y) > 0.5 {
                 movingTextDidChange = true
             }
@@ -407,8 +420,14 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         case .movingText:
             if movingTextDidChange, let snapshot = movingTextSnapshot {
                 pushUndoSnapshot(snapshot)
+                // 拖动结束才落到已提交集合：整场拖动只重建一次标注位图
+                if let overlay = movingTextOverlay,
+                   let index = annotations.firstIndex(where: { $0.id == overlay.id }) {
+                    annotations[index].kind = overlay.kind
+                }
             }
             movingTextSnapshot = nil
+            movingTextOverlay = nil
             movingTextDidChange = false
             updateToolbarState()
 
@@ -1042,16 +1061,9 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
 
     // MARK: - Color
 
-    // 取色器模式的放大镜无条件显示；edit 模式只有开启放大镜时才需要整屏像素缓冲。
-    // 关闭放大镜时 C 键取色走 PixelSampler 的单像素降级采样，不必分配整屏 RGBA 拷贝。
-    var shouldPreparePixelBuffer: Bool {
-        mode == .colorPicker || AppSettings.shared.showMagnifier
-    }
-
+    // 取色按需单像素采样，不再预热整屏 RGBA 缓冲，放大镜开关与取色路径都无需分配大块内存。
     private func pixelColor(at localPoint: CGPoint) -> RGBAColor? {
-        if shouldPreparePixelBuffer {
-            pixelSampler.prepare()
-        }
+        pixelSampler.prepare()
         let imagePoint = CGPoint(
             x: floor(min(max(localPoint.x, 0), bounds.width - 0.001) * captured.scale),
             y: floor(min(max(localPoint.y, 0), bounds.height - 0.001) * captured.scale)
@@ -1348,15 +1360,18 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             originInImage: Geometry.pixelRect(for: selection, scale: captured.scale).origin,
             pixelsPerPoint: captured.scale
         )
-        let visibleAnnotations = editingTextID == nil
-            ? annotations
-            : annotations.filter { $0.id != editingTextID }
+        var visibleAnnotations = annotations
+        if let editingTextID {
+            visibleAnnotations.removeAll { $0.id == editingTextID }
+        }
         // 已提交标注缓存为位图层，鼠标移动/画笔拖动时不再全量重渲染；
         // 缓存仍由 AnnotationRenderer 生成，保证与导出一致
         let localRect = CGRect(origin: .zero, size: selection.size)
-        if let layer = committedAnnotationLayer(for: selection, visibleAnnotations: visibleAnnotations) {
-            AnnotationRenderer.drawImageTopLeft(layer, in: localRect, in: context)
-        } else {
+
+        if isSelectionGeometryChanging {
+            // 选区移动/缩放中：缓存键必然失配（马赛克/模糊按 origin 采样底图），
+            // 直接实时绘制，省掉每个鼠标事件重建整张选区位图的分配与拷贝；
+            // 绘制顺序与像素输出与缓存路径完全一致（都走 AnnotationRenderer）
             AnnotationRenderer.draw(
                 annotations: visibleAnnotations,
                 in: context,
@@ -1364,6 +1379,40 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
                 source: source,
                 effectCache: effectCache
             )
+        } else if let movingText = movingTextOverlay {
+            // 拖动中的文字：已提交集合切成前后两段分别缓存，
+            // 拖动过程中两段保持有效，整场拖动不重建位图；层叠顺序与提交后一致
+            let index = visibleAnnotations.firstIndex { $0.id == movingText.id }
+            let head = index.map { Array(visibleAnnotations[..<$0]) } ?? visibleAnnotations
+            let tail = index.map { Array(visibleAnnotations[visibleAnnotations.index(after: $0)...]) } ?? []
+            let (headLayer, headCache) = annotationLayer(for: selection, annotations: head, cached: annotationCache)
+            annotationCache = headCache
+            if let headLayer {
+                AnnotationRenderer.drawImageTopLeft(headLayer, in: localRect, in: context)
+            }
+            // 拖动中的文字走像素空间渲染：与已提交位图、导出同一 CTM，
+            // 否则字形抗锯齿会有细微差异（所见即所得要求逐像素一致）
+            if let tile = renderAnnotationTile(movingText, selection: selection, source: source) {
+                // 上下文已平移到选区原点，瓦片按选区局部坐标贴回
+                let tileRect = CGRect(
+                    x: tile.origin.x,
+                    y: tile.origin.y,
+                    width: CGFloat(tile.image.width) / captured.scale,
+                    height: CGFloat(tile.image.height) / captured.scale
+                )
+                AnnotationRenderer.drawImageTopLeft(tile.image, in: tileRect, in: context)
+            }
+            let (tailLayer, tailCache) = annotationLayer(for: selection, annotations: tail, cached: annotationCacheTail)
+            annotationCacheTail = tailCache
+            if let tailLayer {
+                AnnotationRenderer.drawImageTopLeft(tailLayer, in: localRect, in: context)
+            }
+        } else {
+            let (layer, cache) = annotationLayer(for: selection, annotations: visibleAnnotations, cached: annotationCache)
+            annotationCache = cache
+            if let layer {
+                AnnotationRenderer.drawImageTopLeft(layer, in: localRect, in: context)
+            }
         }
         if let currentAnnotation {
             AnnotationRenderer.draw(
@@ -1376,29 +1425,85 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         context.restoreGState()
     }
 
+    /// 选区几何正在变化：位图缓存的键包含完整选区，此时命中不了，直接实时绘制
+    private var isSelectionGeometryChanging: Bool {
+        switch dragState {
+        case .moving, .resizing: return true
+        default: return false
+        }
+    }
+
     // 缓存键必须覆盖渲染结果依赖的全部输入：完整选区（马赛克/模糊按 origin 采样底图，
     // 仅尺寸不变也会改变结果）与标注集合；captured 的图像和 scale 在画布生命周期内不变
     func committedAnnotationLayer(for selection: CGRect, visibleAnnotations: [Annotation]) -> CGImage? {
-        if let cache = annotationCache,
-           cache.selection == selection,
-           cache.annotations == visibleAnnotations {
-            return cache.image
+        let (image, cache) = annotationLayer(for: selection, annotations: visibleAnnotations, cached: annotationCache)
+        annotationCache = cache
+        return image
+    }
+
+    /// 渲染并缓存一段标注的位图层；返回新的缓存槽，由调用方持有
+    private func annotationLayer(
+        for selection: CGRect,
+        annotations: [Annotation],
+        cached: AnnotationCache?
+    ) -> (image: CGImage?, cache: AnnotationCache?) {
+        if let cached, cached.selection == selection, cached.annotations == annotations {
+            return (cached.image, cached)
         }
-        guard !visibleAnnotations.isEmpty else {
-            annotationCache = nil
-            return nil
+        guard !annotations.isEmpty else {
+            return (nil, nil)
         }
         let source = RenderSource(
             image: captured.image,
             originInImage: Geometry.pixelRect(for: selection, scale: captured.scale).origin,
             pixelsPerPoint: captured.scale
         )
-        guard let image = renderAnnotationCache(visibleAnnotations, selection: selection, source: source) else {
-            annotationCache = nil
-            return nil
+        guard let image = renderAnnotationCache(annotations, selection: selection, source: source) else {
+            return (nil, nil)
         }
-        annotationCache = AnnotationCache(image: image, selection: selection, annotations: visibleAnnotations)
-        return image
+        annotationLayerRenderCount += 1
+        return (image, AnnotationCache(image: image, selection: selection, annotations: annotations))
+    }
+
+    /// 把单个标注渲染成小瓦片：与整张选区位图使用同一像素空间 CTM，
+    /// 且瓦片原点对齐到选区像素网格，保证光栅化相位一致（逐像素可复现）。
+    /// 用于拖动中的文字实时预览，避免每个鼠标事件重建整张选区位图。
+    private func renderAnnotationTile(
+        _ annotation: Annotation,
+        selection: CGRect,
+        source: RenderSource
+    ) -> (image: CGImage, origin: CGPoint)? {
+        let scale = captured.scale
+        let bounds = annotation.bounds.insetBy(dx: -4, dy: -4)
+        guard bounds.width > 0, bounds.height > 0, scale > 0 else { return nil }
+        // 原点对齐到选区像素网格：相对选区原点偏移整像素，保证相位与整图位图一致
+        let originX = (bounds.minX * scale).rounded(.down) / scale
+        let originY = (bounds.minY * scale).rounded(.down) / scale
+        let width = max(1, Int(((bounds.maxX - originX) * scale).rounded(.up)))
+        let height = max(1, Int(((bounds.maxY - originY) * scale).rounded(.up)))
+        let colorSpace = captured.image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .high
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -originX, y: -originY)
+        AnnotationRenderer.draw(
+            annotation: annotation,
+            in: context,
+            source: source,
+            effectCache: effectCache
+        )
+        guard let image = context.makeImage() else { return nil }
+        return (image, CGPoint(x: originX, y: originY))
     }
 
     func renderAnnotationCache(
@@ -1459,10 +1564,10 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     }
 
     private func drawSelectedTextChrome(in context: CGContext) {
-        guard textEditingBox == nil,
-              let selection,
-              let selectedTextAnnotation,
-              case let .text(origin, string, fontSize) = selectedTextAnnotation.kind
+        guard textEditingBox == nil, let selection else { return }
+        // 拖动中的文字位置以覆盖层为准：虚线选框必须跟随移动，否则会留在原位置
+        guard let annotation = movingTextOverlay ?? selectedTextAnnotation,
+              case let .text(origin, string, fontSize) = annotation.kind
         else { return }
         let textRect = TextMetrics.textRect(origin: origin, string: string, fontSize: fontSize)
             .offsetBy(dx: selection.minX, dy: selection.minY)

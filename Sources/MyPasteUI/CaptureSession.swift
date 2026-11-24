@@ -2,19 +2,46 @@ import AppKit
 import MyPasteCore
 import UniformTypeIdentifiers
 
+/// 保存路径已编码的落盘数据：历史库可直接复用同一份 PNG，避免整图二次编码
+public struct EncodedCapture: Sendable {
+    public let data: Data
+    public let fileExtension: String
+
+    public init(data: Data, fileExtension: String) {
+        self.data = data
+        self.fileExtension = fileExtension
+    }
+}
+
 public struct CaptureResult {
     public let image: CGImage
     public let screen: NSScreen
     public let screenRect: CGRect
     public let scale: CGFloat
     public let createdAt: Date
+    /// 已编码的落盘数据（保存路径填充）：与 image 同源，供历史库复用
+    public var encoded: EncodedCapture?
 
-    public init(image: CGImage, screen: NSScreen, screenRect: CGRect, scale: CGFloat, createdAt: Date = Date()) {
+    public init(
+        image: CGImage,
+        screen: NSScreen,
+        screenRect: CGRect,
+        scale: CGFloat,
+        createdAt: Date = Date(),
+        encoded: EncodedCapture? = nil
+    ) {
         self.image = image
         self.screen = screen
         self.screenRect = screenRect
         self.scale = scale
         self.createdAt = createdAt
+        self.encoded = encoded
+    }
+
+    /// 可直接作为历史库 PNG 复用的数据（仅 PNG 格式内容一致）
+    public var reusablePNGData: Data? {
+        guard let encoded, encoded.fileExtension.lowercased() == "png" else { return nil }
+        return encoded.data
     }
 }
 
@@ -201,7 +228,9 @@ public final class CaptureSession {
 
         savePanel = panel
         isPresentingPanel = true
-        // panel 由闭包强持有：先释放属性再读 weak 引用会让面板可能已释放、保存静默丢失
+        // 面板由 savePanel 属性强持有直到 sheet 结束，闭包只弱引用 self/canvas/window：
+        // 闭包若强捕获 panel 会与面板持有的 completionHandler 形成环，
+        // 连带留住已合成的整屏位图，直到进程退出才释放
         panel.beginSheetModal(for: window) { [weak self, weak canvas, weak window] response in
             guard let self else { return }
             self.isPresentingPanel = false
@@ -209,7 +238,8 @@ public final class CaptureSession {
                 self.savePanel = nil
                 return
             }
-            if response == .OK, let url = panel.url {
+            // URL 从强持有的 savePanel 读取：面板在 sheet 期间不会被释放
+            if response == .OK, let url = self.savePanel?.url {
                 // 先结束会话再写盘：写盘期间保持可交互会让取消/继续编辑静默覆盖保存结果；
                 // 成败都必须回调宿主，否则会话对象会滞留在控制器里导致后续截图失效
                 let image = result.image
@@ -217,8 +247,11 @@ public final class CaptureSession {
                 self.close()
                 DispatchQueue.global(qos: .userInitiated).async {
                     let failure: Error?
+                    var saved = result
                     do {
-                        try ImageExporter.write(image, to: url, jpegQuality: AppSettings.shared.jpegQuality)
+                        // write 返回已编码数据：历史库复用同一份 PNG，不再二次编码整图
+                        let data = try ImageExporter.write(image, to: url, jpegQuality: AppSettings.shared.jpegQuality)
+                        saved.encoded = EncodedCapture(data: data, fileExtension: url.pathExtension)
                         failure = nil
                     } catch {
                         failure = error
@@ -227,7 +260,7 @@ public final class CaptureSession {
                         if let failure {
                             callbacks.onSaveFailed(failure)
                         } else {
-                            callbacks.onSaved(result, url)
+                            callbacks.onSaved(saved, url)
                         }
                     }
                 }

@@ -248,7 +248,11 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
     private var reloadGeneration = 0
     private var thumbnails: [String: NSImage] = [:]
     private var thumbnailOrder: [String] = []
-    private let thumbnailCacheLimit = 120
+    /// 缩略图缓存上限跟随历史条数上限：每张解码后约 0.36MB（400px），
+    /// 上限固定为 120 时常驻内存会明显高于历史网格的实际需要
+    private var thumbnailCacheLimit: Int {
+        max(20, AppSettings.shared.historyLimit)
+    }
     private var thumbnailLoadGeneration = 0
     private var historyObserver: NSObjectProtocol?
     private var lastGridWidth: CGFloat = 0
@@ -516,7 +520,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         guard let source = CGImageSourceCreateWithURL(entry.url as CFURL, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 640,
+            kCGImageSourceThumbnailMaxPixelSize: Int(HistoryStore.thumbnailMaxPixel),
             kCGImageSourceCreateThumbnailWithTransform: true,
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }

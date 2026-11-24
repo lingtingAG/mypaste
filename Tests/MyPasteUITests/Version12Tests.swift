@@ -22,17 +22,15 @@ final class Version12Tests: XCTestCase {
         super.tearDown()
     }
 
-    func testPixelBufferThreshold() throws {
+    func testPixelSamplingDoesNotAllocateFullScreenBuffer() throws {
         AppSettings.shared.showMagnifier = false
         let edit = SelectionCanvasView(captured: try makeCaptured(), mode: .edit)
-        XCTAssertFalse(edit.shouldPreparePixelBuffer, "关闭放大镜时不应分配整屏 RGBA 缓冲")
-
         AppSettings.shared.showMagnifier = true
-        XCTAssertTrue(edit.shouldPreparePixelBuffer)
-
         let picker = SelectionCanvasView(captured: try makeCaptured(), mode: .colorPicker)
-        AppSettings.shared.showMagnifier = false
-        XCTAssertTrue(picker.shouldPreparePixelBuffer, "取色器模式的放大镜无条件显示")
+        // v1.3：取色改为按需单像素采样，常驻缓冲与源图尺寸无关，
+        // 放大镜开关不再决定是否分配整屏 RGBA 拷贝
+        XCTAssertEqual(edit.pixelSampler.residentPixelCount, 1)
+        XCTAssertEqual(picker.pixelSampler.residentPixelCount, 1)
     }
 
     func testCursorDirtyRectsCoverBothCursorsAndStaySmall() throws {
