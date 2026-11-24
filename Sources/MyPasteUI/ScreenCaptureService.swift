@@ -6,12 +6,28 @@ public struct ScreenCaptureBatch {
     public let screens: [CapturedScreen]
     /// 未能匹配到 SCDisplay 的屏幕数；大于 0 时调用方必须提示用户覆盖不完整
     public let unmappedScreenCount: Int
+    /// 匹配成功但抓图失败的屏幕数，与映射失败合并提示
+    public let failedCaptureCount: Int
 
-    public init(screens: [CapturedScreen], unmappedScreenCount: Int) {
+    public var incompleteScreenCount: Int { unmappedScreenCount + failedCaptureCount }
+
+    public init(screens: [CapturedScreen], unmappedScreenCount: Int, failedCaptureCount: Int = 0) {
         self.screens = screens
         self.unmappedScreenCount = unmappedScreenCount
+        self.failedCaptureCount = failedCaptureCount
     }
 }
+
+/// 抓屏依赖的可注入接口：让控制器能在测试中替换为可延迟完成的替身，
+/// 覆盖「超时 / 取消后旧任务才返回」的竞态。
+public protocol ScreenCaptureProviding: AnyObject {
+    var hasPermission: Bool { get }
+    func requestPermission() -> Bool
+    func captureAllScreens() async throws -> ScreenCaptureBatch
+    func captureScreen(under cocoaPoint: CGPoint) async throws -> CapturedScreen
+}
+
+extension ScreenCaptureService: ScreenCaptureProviding {}
 
 public struct CapturedScreen {
     public let screen: NSScreen
@@ -57,6 +73,9 @@ public enum ScreenCaptureError: LocalizedError {
 public final class ScreenCaptureService {
     public static let shared = ScreenCaptureService()
 
+    // CaptureEnvironment 的 public 默认参数需要可见的无参构造
+    public init() {}
+
     public var hasPermission: Bool {
         CGPreflightScreenCaptureAccess()
     }
@@ -71,10 +90,11 @@ public final class ScreenCaptureService {
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let screens = NSScreen.screens
-        // 并行冻结各屏，缩多多屏冻结时刻差
-        var captured = [CapturedScreen?](repeating: nil, count: screens.count)
         var unmapped = 0
-        try await withThrowingTaskGroup(of: (Int, CapturedScreen).self) { group in
+        // 单屏抓图失败不应作废其他屏已冻结的画面：子任务各自返回 Result，最后按屏幕顺序聚合
+        let (images, failures) = await withTaskGroup(
+            of: (Int, Result<CapturedScreen, Error>).self
+        ) { group in
             for (index, screen) in screens.enumerated() {
                 guard let displayID = screen.mpDisplayID,
                       let display = content.displays.first(where: { $0.displayID == displayID }) else {
@@ -82,26 +102,42 @@ public final class ScreenCaptureService {
                     continue
                 }
                 group.addTask {
-                    let image = try await Self.captureImage(display: display, screen: screen)
-                    let scale = CapturedScreen.effectiveScale(
-                        imageWidth: image.width,
-                        frameWidth: screen.frame.width,
-                        fallback: screen.backingScaleFactor
-                    )
-                    return (index, CapturedScreen(screen: screen, image: image, scale: scale))
+                    do {
+                        let image = try await Self.captureImage(display: display, screen: screen)
+                        let scale = CapturedScreen.effectiveScale(
+                            imageWidth: image.width,
+                            frameWidth: screen.frame.width,
+                            fallback: screen.backingScaleFactor
+                        )
+                        return (index, .success(CapturedScreen(screen: screen, image: image, scale: scale)))
+                    } catch {
+                        return (index, .failure(error))
+                    }
                 }
             }
-            for try await (index, result) in group {
-                captured[index] = result
+            var captured = [Int: CapturedScreen]()
+            var failed = 0
+            for await (index, result) in group {
+                switch result {
+                case let .success(screen): captured[index] = screen
+                case .failure: failed += 1
+                }
             }
+            return (captured, failed)
         }
 
-        let result = captured.compactMap { $0 }
-        // 映射失败不再静默：全部失败报 displayNotFound，部分失败由调用方提示用户
+        let result = screens.indices.compactMap { images[$0] }
+        // 映射失败与抓图失败分开归类，但都不再静默：全部失败必须抛错
         guard !result.isEmpty else {
-            throw unmapped > 0 ? ScreenCaptureError.displayNotFound : ScreenCaptureError.noDisplays
+            if unmapped > 0 { throw ScreenCaptureError.displayNotFound }
+            if failures > 0 { throw ScreenCaptureError.captureFailed("所有显示器均抓取失败") }
+            throw ScreenCaptureError.noDisplays
         }
-        return ScreenCaptureBatch(screens: result, unmappedScreenCount: unmapped)
+        return ScreenCaptureBatch(
+            screens: result,
+            unmappedScreenCount: unmapped,
+            failedCaptureCount: failures
+        )
     }
 
     /// 只抓目标点所在的屏幕，用于全屏截图等单屏场景，避免抓全部显示器

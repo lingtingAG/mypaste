@@ -18,6 +18,8 @@ public final class AppSettings {
             prefix + "toolFontSize": 20.0,
             prefix + "toolFilled": false,
             prefix + "toolColor": RGBAColor.red.hexString,
+            prefix + "saveFormat": SaveFormat.png.rawValue,
+            prefix + "jpegQuality": 0.92,
         ])
     }
 
@@ -92,6 +94,39 @@ public final class AppSettings {
         }
         set { set(newValue.hexString, key: "toolColor") }
     }
+
+    public var saveFormat: SaveFormat {
+        get {
+            guard let raw = defaults.string(forKey: prefix + "saveFormat"),
+                  let format = SaveFormat(rawValue: raw) else { return .png }
+            return format
+        }
+        set { set(newValue.rawValue, key: "saveFormat") }
+    }
+
+    public var jpegQuality: CGFloat {
+        get {
+            let value = defaults.double(forKey: prefix + "jpegQuality")
+            return value > 0 ? min(1, max(0.1, CGFloat(value))) : 0.92
+        }
+        set { set(Double(min(1, max(0.1, newValue))), key: "jpegQuality") }
+    }
+
+    /// 记住上次选择的标注工具。文字工具与移动工具不作为跨会话初始工具：
+    /// 前者会让新会话一点击就弹输入框，后者等价于没有偏好。
+    public var lastTool: Tool {
+        get {
+            guard let raw = defaults.string(forKey: prefix + "lastTool"),
+                  let tool = Tool(rawValue: raw),
+                  Self.rememberedTools.contains(tool) else { return .move }
+            return tool
+        }
+        set { set(newValue.rawValue, key: "lastTool") }
+    }
+
+    private static let rememberedTools: [Tool] = [
+        .rectangle, .ellipse, .arrow, .pen, .marker, .mosaic, .blur, .number, .eraser
+    ]
 
     public var saveDirectory: URL {
         get {

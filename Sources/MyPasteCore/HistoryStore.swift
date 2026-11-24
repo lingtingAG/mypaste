@@ -50,7 +50,7 @@ public final class HistoryStore: @unchecked Sendable {
                 ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
             self.rootURL = support.appendingPathComponent("MyPaste/History", isDirectory: true)
         }
-        try? FileManager.default.createDirectory(at: self.rootURL, withIntermediateDirectories: true)
+        try? SecureFileWriter.ensurePrivateDirectory(at: self.rootURL)
     }
 
     /// - Parameters:
@@ -115,7 +115,7 @@ public final class HistoryStore: @unchecked Sendable {
         diskLimitMB: Int?,
         onPruneError: ((Error) -> Void)? = nil
     ) throws -> HistoryEntry {
-        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        try SecureFileWriter.ensurePrivateDirectory(at: rootURL)
         let now = Date()
         let unique = UUID().uuidString.prefix(4)
         let base = "\(ImageExporter.timestampBase(date: now))_\(unique)"
@@ -125,14 +125,14 @@ public final class HistoryStore: @unchecked Sendable {
         guard let png = pngData ?? ImageExporter.pngData(image) else {
             throw ImageExporter.ExportError.encodingFailed
         }
-        try png.write(to: url, options: .atomic)
+        try SecureFileWriter.write(png, to: url)
 
         var thumbnailSize: Int64 = 0
         if let thumb = Self.makeThumbnail(image, maxPixel: 640),
            let thumbData = ImageExporter.pngData(thumb) {
             // 缩略图写入失败不阻断主记录，但预算只统计实际落盘的字节
             do {
-                try thumbData.write(to: thumbnailURL, options: .atomic)
+                try SecureFileWriter.write(thumbData, to: thumbnailURL)
                 thumbnailSize = Int64(thumbData.count)
             } catch {
                 thumbnailSize = 0

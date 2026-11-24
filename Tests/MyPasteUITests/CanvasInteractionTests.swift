@@ -10,11 +10,15 @@ final class CanvasInteractionTests: XCTestCase {
     private var captured: CapturedScreen!
     // 工具栏动作会写 AppSettings.shared（UserDefaults.standard 的测试域），结束时还原避免污染后续运行
     private var originalFontSize: CGFloat = 20
+    private var originalLastTool: Tool = .move
 
     override func setUp() {
         super.setUp()
         _ = NSApplication.shared
         originalFontSize = AppSettings.shared.toolFontSize
+        originalLastTool = AppSettings.shared.lastTool
+        // 画布初始工具现在读共享设置，每个测试都从默认的移动工具开始
+        AppSettings.shared.lastTool = .move
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let image = Self.makeImage(width: 1600, height: 1200)
         captured = CapturedScreen(screen: screen, image: image, scale: 2)
@@ -32,6 +36,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     override func tearDown() {
         AppSettings.shared.toolFontSize = originalFontSize
+        AppSettings.shared.lastTool = originalLastTool
         window?.close()
         canvas = nil
         window = nil

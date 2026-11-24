@@ -819,6 +819,155 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(TextMetrics.clampedFontSize(42), 42)
     }
 
+    // MARK: - v1.1: secure writes, save formats, tool memory
+
+    func testSecureFileWriterRestrictsFileAndDirectoryPermissions() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("MyPasteSecure-\(UUID().uuidString)", isDirectory: true)
+        let dir = root.appendingPathComponent("nested", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let url = dir.appendingPathComponent("shot.png")
+        let data = Data([0x01, 0x02, 0x03])
+        try SecureFileWriter.write(data, to: url)
+
+        let filePerms = try XCTUnwrap(fm.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(filePerms.intValue, 0o600)
+        let dirPerms = try XCTUnwrap(fm.attributesOfItem(atPath: dir.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(dirPerms.intValue, 0o700)
+        XCTAssertEqual(try Data(contentsOf: url), data)
+    }
+
+    func testSecureFileWriterDoesNotChangeExistingDirectoryPermissions() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("MyPasteSecure-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o755)]
+        )
+        try SecureFileWriter.ensureDirectory(at: dir)
+        let perms = try XCTUnwrap(fm.attributesOfItem(atPath: dir.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(perms.intValue, 0o755)
+    }
+
+    func testHistoryStoreWritesPrivateFilesAndDirectory() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("MyPasteHistoryPerm-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 24, height: 16)
+        let recorded = expectation(description: "record")
+        var entry: HistoryEntry?
+        store.record(image, completion: { value in
+            entry = value
+            recorded.fulfill()
+        })
+        wait(for: [recorded], timeout: 5)
+        let saved = try XCTUnwrap(entry)
+        for url in [saved.url, saved.thumbnailURL] {
+            let perms = try XCTUnwrap(fm.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)
+            XCTAssertEqual(perms.intValue, 0o600)
+        }
+        let dirPerms = try XCTUnwrap(fm.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(dirPerms.intValue, 0o700)
+    }
+
+    func testExporterWriteProducesPrivateFile() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("MyPasteExportPerm-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("shot.png")
+        try ImageExporter.write(try makeTestImage(width: 20, height: 10), to: url)
+        let perms = try XCTUnwrap(fm.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(perms.intValue, 0o600)
+    }
+
+    func testSaveFormatAndJPEGQualitySettings() throws {
+        let suite = "com.mypaste.tests.settings"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertEqual(settings.saveFormat, .png)
+        XCTAssertEqual(settings.jpegQuality, 0.92, accuracy: 0.001)
+        settings.saveFormat = .jpeg
+        XCTAssertEqual(AppSettings(defaults: defaults).saveFormat, .jpeg)
+        settings.jpegQuality = 5
+        XCTAssertEqual(settings.jpegQuality, 1, accuracy: 0.001)
+        settings.jpegQuality = 0
+        XCTAssertEqual(settings.jpegQuality, 0.1, accuracy: 0.001)
+        defaults.set("bogus", forKey: "com.mypaste.saveFormat")
+        XCTAssertEqual(settings.saveFormat, .png)
+    }
+
+    func testSaveFormatExtensionsAndJPEGQualityEncoding() throws {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertTrue(ImageExporter.timestampedFileName(date: date, fileExtension: "jpeg").hasSuffix(".jpeg"))
+        XCTAssertTrue(ImageExporter.displayFileName(date: date, fileExtension: "tiff").hasSuffix(".tiff"))
+        XCTAssertEqual(SaveFormat.allCases.map(\.fileExtension), ["png", "jpeg", "tiff"])
+        let image = try makeTestImage(width: 60, height: 40)
+        let high = try XCTUnwrap(ImageExporter.data(for: image, fileExtension: "jpeg", jpegQuality: 1))
+        let low = try XCTUnwrap(ImageExporter.data(for: image, fileExtension: "jpeg", jpegQuality: 0.1))
+        XCTAssertGreaterThan(high.count, low.count)
+    }
+
+    func testLastToolWhitelist() throws {
+        let suite = "com.mypaste.tests.settings"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertEqual(settings.lastTool, .move)
+        settings.lastTool = .rectangle
+        XCTAssertEqual(AppSettings(defaults: defaults).lastTool, .rectangle)
+        settings.lastTool = .text
+        XCTAssertEqual(settings.lastTool, .move)
+        settings.lastTool = .move
+        XCTAssertEqual(settings.lastTool, .move)
+        defaults.set("bogus", forKey: "com.mypaste.lastTool")
+        XCTAssertEqual(settings.lastTool, .move)
+    }
+
+    func testSecureFileWriterReportsPermissionFailureAndRollsBack() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("MyPastePermFail-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("shot.png")
+        let original = SecureFileWriter.attributeSetter
+        defer { SecureFileWriter.attributeSetter = original }
+        // 目录收紧成功，文件收紧失败：必须抛错且不能留下权限不符的截图
+        SecureFileWriter.attributeSetter = { path, attributes in
+            if path == url.path {
+                throw NSError(domain: "MyPasteTests", code: 1, userInfo: nil)
+            }
+            try fm.setAttributes(attributes, ofItemAtPath: path)
+        }
+        XCTAssertThrowsError(try SecureFileWriter.write(Data([0x01, 0x02]), to: url))
+        XCTAssertFalse(fm.fileExists(atPath: url.path))
+    }
+
+    func testSecureFileWriterReportsDirectoryPermissionFailure() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("MyPastePermFail-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o755)]
+        )
+        let original = SecureFileWriter.attributeSetter
+        defer { SecureFileWriter.attributeSetter = original }
+        SecureFileWriter.attributeSetter = { _, _ in
+            throw NSError(domain: "MyPasteTests", code: 2, userInfo: nil)
+        }
+        XCTAssertThrowsError(try SecureFileWriter.ensurePrivateDirectory(at: dir))
+    }
+
     // MARK: - Helpers
 
     private func makeTestImage(width: Int, height: Int) throws -> CGImage {

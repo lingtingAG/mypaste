@@ -385,24 +385,31 @@ private final class PinContentView: NSView {
         guard let window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff]
-        panel.nameFieldStringValue = ImageExporter.displayFileName()
+        panel.nameFieldStringValue = ImageExporter.displayFileName(
+            fileExtension: AppSettings.shared.saveFormat.fileExtension
+        )
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.directoryURL = AppSettings.shared.saveDirectory
-        try? FileManager.default.createDirectory(
-            at: AppSettings.shared.saveDirectory,
-            withIntermediateDirectories: true
+        try? SecureFileWriter.ensureDirectory(
+            at: AppSettings.shared.saveDirectory
         )
         NSApp.activate()
-        panel.beginSheetModal(for: window) { [weak self, weak window, weak panel] response in
-            guard let self, let window, let panel else { return }
+        // panel 必须被闭包强持有：sheet 结束后 AppKit 可能释放面板，weak 会让保存静默丢失
+        panel.beginSheetModal(for: window) { [weak self, weak window] response in
+            guard let self, let window else {
+                if response == .OK {
+                    AppNotice.show(title: "保存未完成", detail: "窗口已关闭，请重试。", duration: 2.5, dedupe: false)
+                }
+                return
+            }
             if response == .OK, let url = panel.url {
                 // 编码与写盘放后台，避免大图在保存面板回调里阻塞主线程
                 let image = self.image
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     var failure: Error?
                     do {
-                        try ImageExporter.write(image, to: url)
+                        try ImageExporter.write(image, to: url, jpegQuality: AppSettings.shared.jpegQuality)
                     } catch {
                         failure = error
                     }

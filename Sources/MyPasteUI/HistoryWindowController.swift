@@ -577,9 +577,18 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
         panel.allowedContentTypes = [.png, .jpeg, .tiff]
         panel.nameFieldStringValue = entry.url.lastPathComponent
         panel.canCreateDirectories = true
-        panel.directoryURL = AppSettings.shared.saveDirectory
-        panel.beginSheetModal(for: window) { [weak window, weak panel] response in
-            guard let window, let panel, response == .OK, let url = panel.url else { return }
+        let directory = AppSettings.shared.saveDirectory
+        // 仅作为面板起点，与截图/贴图保存面板一致；创建失败不阻断打开面板，
+        // 真正写盘时 ImageExporter.write 会严格建目录并检查权限
+        try? SecureFileWriter.ensureDirectory(at: directory)
+        panel.directoryURL = directory
+        // panel 必须被闭包强持有：sheet 结束后 AppKit 可能释放面板，weak 会让保存静默丢失
+        panel.beginSheetModal(for: window) { [weak window] response in
+            guard response == .OK, let url = panel.url else { return }
+            guard let window else {
+                AppNotice.show(title: "保存未完成", detail: "窗口已关闭，请重试。", duration: 2.5, dedupe: false)
+                return
+            }
             // 解码与编码都在后台执行，避免大图阻塞主线程
             DispatchQueue.global(qos: .userInitiated).async {
                 var failure: Error?
@@ -587,7 +596,7 @@ public final class HistoryWindowController: NSObject, NSWindowDelegate {
                     guard let image = Self.decodeImage(at: entry.url) else {
                         throw ImageExporter.ExportError.decodeFailed
                     }
-                    try ImageExporter.write(image, to: url)
+                    try ImageExporter.write(image, to: url, jpegQuality: AppSettings.shared.jpegQuality)
                 } catch {
                     failure = error
                 }

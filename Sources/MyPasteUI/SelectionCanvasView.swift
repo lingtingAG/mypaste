@@ -71,6 +71,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     private var undoStack: [[Annotation]] = []
     private var redoStack: [[Annotation]] = []
     private var currentAnnotation: Annotation?
+    private let initialTool: Tool
     private(set) var tool: Tool = .move
     private(set) var currentColor = AppSettings.shared.toolColor
     private(set) var currentLineWidth = AppSettings.shared.toolLineWidth
@@ -102,6 +103,8 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     public init(captured: CapturedScreen, mode: CaptureInteractionMode = .edit) {
         self.captured = captured
         self.mode = mode
+        self.initialTool = AppSettings.shared.lastTool
+        self.tool = self.initialTool
         super.init(frame: NSRect(origin: .zero, size: captured.frame.size))
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
@@ -380,7 +383,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             undoStack.removeAll()
             redoStack.removeAll()
             selectedTextID = nil
-            tool = .move
+            tool = initialTool
             pendingWindowSelection = nil
             hoveredWindow = nil
             showToolbar()
@@ -603,7 +606,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         undoStack.removeAll()
         redoStack.removeAll()
         selectedTextID = nil
-        tool = .move
+        tool = initialTool
         showToolbar()
         needsDisplay = true
     }
@@ -615,6 +618,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         commitTextEditing()
         selectedTextID = nil
         tool = newTool
+        AppSettings.shared.lastTool = newTool
         window?.makeFirstResponder(self)
         updateToolbarState()
         updateCursor(at: pointerLocation())
@@ -1203,7 +1207,7 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         currentAnnotation = nil
         selectedTextID = nil
         toolbar?.isHidden = true
-        tool = .move
+        tool = initialTool
         needsDisplay = true
     }
 
@@ -1268,7 +1272,8 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             drawSelectionAnnotations(selection, in: context)
             drawSelectionChrome(selection, in: context)
             drawSelectedTextChrome(in: context)
-            if tool != .text, case .none = dragState {
+            // 拖选 / 手柄缩放 / 移动过程中也要看到实时尺寸与坐标，松手前就能对齐
+            if tool != .text {
                 drawSizeBadge(for: selection, in: context)
             }
         }
@@ -1456,8 +1461,10 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     }
 
     private func drawSizeBadge(for selection: CGRect, in context: CGContext) {
-        let pixelSize = ImageComposer.outputPixelSize(selectionRect: selection, scale: captured.scale)
-        let text = "\(Int(pixelSize.width)) × \(Int(pixelSize.height)) px"
+        let pixelRect = Geometry.pixelRect(for: selection, scale: captured.scale)
+        let width = max(1, Int(pixelRect.width))
+        let height = max(1, Int(pixelRect.height))
+        let text = "\(width) × \(height) px   @ \(Int(pixelRect.origin.x)), \(Int(pixelRect.origin.y))"
         let font = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -1466,7 +1473,8 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         let textSize = (text as NSString).size(withAttributes: attributes)
         let pillSize = CGSize(width: textSize.width + 18, height: textSize.height + 10)
         var x = selection.midX - pillSize.width / 2
-        x = min(max(6, x), bounds.width - pillSize.width - 6)
+        // 文案变长后窄画布也不能把 badge 推到负坐标被裁掉
+        x = min(max(6, x), max(6, bounds.width - pillSize.width - 6))
         var y = selection.minY - pillSize.height - 7
         if y < 6 {
             y = selection.minY + 7

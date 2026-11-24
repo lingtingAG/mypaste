@@ -86,16 +86,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     private func performIncomingURL(_ url: URL) {
         guard url.scheme?.lowercased() == "mypaste" else { return }
-        switch url.host?.lowercased() {
-        case "capture": captureRegion()
-        case "pin": pinClipboard()
-        case "fullscreen": captureFullScreen()
-        case "colorpicker", "picker": openColorPicker()
-        case "history": showHistory()
-        case "settings", "preferences": showPreferences()
-        case "quit": NSApp.terminate(nil)
-        default: break
+        let action = ExternalURLAction(host: url.host)
+        // 无可见界面的敏感动作不能被任意本地进程静默触发
+        if action.requiresConfirmation, !confirmExternal(action) { return }
+        switch action {
+        case .capture: captureRegion()
+        case .colorPicker: openColorPicker()
+        case .history: showHistory()
+        case .settings: showPreferences()
+        case .pin: pinClipboard()
+        case .fullScreen:
+            statusItem?.menu?.cancelTracking()
+            // 外部触发只写剪贴板与历史库，不自动保存到用户目录
+            captureController.captureFullScreen(autoSave: false)
+        case .quit: NSApp.terminate(nil)
+        case .unknown: break
         }
+    }
+
+    private func confirmExternal(_ action: ExternalURLAction) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = action.confirmationTitle
+        alert.informativeText = action.confirmationDetail
+        alert.addButton(withTitle: "允许")
+        alert.addButton(withTitle: "取消")
+        // 层级高于截图覆盖窗，避免模态循环被挡住却仍在运行
+        alert.window.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func setupMainMenu() {

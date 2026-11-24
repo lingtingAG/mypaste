@@ -35,6 +35,8 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
     private var folderLabel: NSTextField?
     private var historyPopup: NSPopUpButton?
     private var historyDiskPopup: NSPopUpButton?
+    private var saveFormatPopup: NSPopUpButton?
+    private var jpegQualityPopup: NSPopUpButton?
     private var permissionLabel: NSTextField?
     private var permissionButton: NSButton?
     private var appActiveObserver: NSObjectProtocol?
@@ -84,7 +86,7 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
     private func ensureWindow() {
         guard window == nil else { return }
         let window = PreferencesWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 630),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -183,12 +185,35 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         historyDiskPopup.controlSize = .regular
         self.historyDiskPopup = historyDiskPopup
 
+        let saveFormatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        for format in SaveFormat.allCases {
+            saveFormatPopup.addItem(withTitle: format.displayName)
+            saveFormatPopup.lastItem?.representedObject = format.rawValue
+        }
+        saveFormatPopup.target = self
+        saveFormatPopup.action = #selector(saveFormatChanged(_:))
+        saveFormatPopup.controlSize = .regular
+        self.saveFormatPopup = saveFormatPopup
+
+        // 档位含默认 0.92，避免 syncState 找不到对应项
+        let jpegQualityPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        for quality in [100, 92, 85, 75, 60] {
+            jpegQualityPopup.addItem(withTitle: quality == 92 ? "92%（默认）" : "\(quality)%")
+            jpegQualityPopup.lastItem?.tag = quality
+        }
+        jpegQualityPopup.target = self
+        jpegQualityPopup.action = #selector(jpegQualityChanged(_:))
+        jpegQualityPopup.controlSize = .regular
+        self.jpegQualityPopup = jpegQualityPopup
+
         let screenshotSection = makeSection(
             title: "截图与保存",
             rows: [
                 makeRow(title: "复制后播放声音", control: sound),
                 makeRow(title: "显示放大镜与像素取色", control: magnifier),
                 makeRow(title: "复制后自动保存到文件夹", control: autoSave),
+                makeRow(title: "默认保存格式", control: saveFormatPopup),
+                makeRow(title: "JPEG 质量", control: jpegQualityPopup),
                 makeRow(title: "保存位置", control: folderStack),
                 makeRow(title: "保留历史记录", control: historyPopup),
                 makeRow(title: "历史磁盘上限", control: historyDiskPopup),
@@ -329,6 +354,24 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
                 popup.selectItem(at: 1)
             }
         }
+        if let popup = saveFormatPopup {
+            let raw = settings.saveFormat.rawValue
+            if let index = popup.itemArray.firstIndex(where: { ($0.representedObject as? String) == raw }) {
+                popup.selectItem(at: index)
+            }
+        }
+        if let popup = jpegQualityPopup {
+            let tag = Int((settings.jpegQuality * 100).rounded())
+            if let index = popup.itemArray.firstIndex(where: { $0.tag == tag }) {
+                popup.selectItem(at: index)
+            } else {
+                // 非档位值只可能来自旧数据 / 代码写入；统一到默认档，
+                // 否则 UI 显示的档位与实际编码质量不一致
+                popup.selectItem(at: 1)
+                settings.jpegQuality = 0.92
+            }
+        }
+        refreshJPEGQualityState()
         refreshPermissionState()
         refreshLaunchAtLoginState()
     }
@@ -398,6 +441,25 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
     @objc private func autoSaveToggled(_ sender: NSSwitch) {
         settings.autoSave = sender.state == .on
+    }
+
+    @objc private func saveFormatChanged(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String,
+              let format = SaveFormat(rawValue: raw) else { return }
+        settings.saveFormat = format
+        refreshJPEGQualityState()
+    }
+
+    @objc private func jpegQualityChanged(_ sender: NSPopUpButton) {
+        let tag = sender.selectedTag()
+        guard tag > 0 else { return }
+        settings.jpegQuality = CGFloat(tag) / 100
+    }
+
+    private func refreshJPEGQualityState() {
+        let enabled = settings.saveFormat == .jpeg
+        jpegQualityPopup?.isEnabled = enabled
+        jpegQualityPopup?.toolTip = enabled ? nil : "仅 JPEG 格式需要设置压缩质量"
     }
 
     @objc private func launchAtLoginToggled(_ sender: NSSwitch) {

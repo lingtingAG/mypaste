@@ -14,14 +14,33 @@ public enum AppNotice {
     /// 同一内容的最小重复间隔：清理类错误每次截图都会复现，不应反复提示
     private static let repeatInterval: TimeInterval = 60
 
-    public static func show(title: String, detail: String? = nil, duration: TimeInterval = 4.5) {
+    /// 成功类提示每次都应出现（连续两次「已复制」不能互相吞掉），传 dedupe: false。
+    /// 抽成纯函数便于单测，不依赖 NSPanel。
+    static func shouldSuppress(
+        signature: String,
+        now: Date,
+        lastSignature: String?,
+        lastShownAt: Date,
+        dedupe: Bool
+    ) -> Bool {
+        guard dedupe else { return false }
+        return lastSignature == signature && now.timeIntervalSince(lastShownAt) < repeatInterval
+    }
+
+    public static func show(title: String, detail: String? = nil, duration: TimeInterval = 4.5, dedupe: Bool = true) {
         let signature = title + "\n" + (detail ?? "")
         let now = Date()
-        if lastSignature == signature, now.timeIntervalSince(lastShownAt) < repeatInterval {
-            return
+        guard !shouldSuppress(
+            signature: signature,
+            now: now,
+            lastSignature: lastSignature,
+            lastShownAt: lastShownAt,
+            dedupe: dedupe
+        ) else { return }
+        if dedupe {
+            lastSignature = signature
+            lastShownAt = now
         }
-        lastSignature = signature
-        lastShownAt = now
 
         dismissWorkItem?.cancel()
         let panel = self.panel ?? makePanel()

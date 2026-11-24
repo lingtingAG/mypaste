@@ -3,6 +3,23 @@ import Combine
 import CoreGraphics
 import Foundation
 
+/// 自动保存与保存面板的默认格式。历史库始终存 PNG（无损、可复用编码结果），不受此设置影响。
+public enum SaveFormat: String, CaseIterable, Sendable {
+    case png
+    case jpeg
+    case tiff
+
+    public var fileExtension: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .png: return "PNG（无损）"
+        case .jpeg: return "JPEG（体积更小）"
+        case .tiff: return "TIFF"
+        }
+    }
+}
+
 public enum ImageExporter {
     public enum ExportError: LocalizedError {
         case encodingFailed
@@ -30,10 +47,10 @@ public enum ImageExporter {
         NSBitmapImageRep(cgImage: image).representation(using: .tiff, properties: [:])
     }
 
-    public static func data(for image: CGImage, fileExtension: String) -> Data? {
+    public static func data(for image: CGImage, fileExtension: String, jpegQuality: CGFloat = 0.92) -> Data? {
         switch fileExtension.lowercased() {
         case "jpg", "jpeg":
-            return jpegData(image)
+            return jpegData(image, quality: jpegQuality)
         case "tif", "tiff":
             return tiffData(image)
         case "png":
@@ -45,20 +62,16 @@ public enum ImageExporter {
 
     private static let supportedExtensions: Set<String> = ["png", "jpg", "jpeg", "tif", "tiff"]
 
-    public static func write(_ image: CGImage, to url: URL) throws {
+    public static func write(_ image: CGImage, to url: URL, jpegQuality: CGFloat = 0.92) throws {
         let ext = url.pathExtension.isEmpty ? "png" : url.pathExtension.lowercased()
         // 扩展名与编码格式必须一致，未知格式显式报错而不是写出内容不符的文件
         guard supportedExtensions.contains(ext) else {
             throw ExportError.unsupportedType
         }
-        guard let data = data(for: image, fileExtension: ext) else {
+        guard let data = data(for: image, fileExtension: ext, jpegQuality: jpegQuality) else {
             throw ExportError.encodingFailed
         }
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try data.write(to: url, options: .atomic)
+        try SecureFileWriter.write(data, to: url)
     }
 
     // DateFormatter 创建开销高且非线程安全，静态复用并加锁

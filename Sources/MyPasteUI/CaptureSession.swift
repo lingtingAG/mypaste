@@ -187,23 +187,28 @@ public final class CaptureSession {
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff]
-        panel.nameFieldStringValue = ImageExporter.displayFileName()
+        panel.nameFieldStringValue = ImageExporter.displayFileName(
+            fileExtension: AppSettings.shared.saveFormat.fileExtension
+        )
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.allowsOtherFileTypes = false
         panel.title = "保存截图"
         panel.prompt = "保存"
         let directory = AppSettings.shared.saveDirectory
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? SecureFileWriter.ensureDirectory(at: directory)
         panel.directoryURL = directory
 
         savePanel = panel
         isPresentingPanel = true
-        panel.beginSheetModal(for: window) { [weak self, weak canvas, weak window, weak panel] response in
+        // panel 由闭包强持有：先释放属性再读 weak 引用会让面板可能已释放、保存静默丢失
+        panel.beginSheetModal(for: window) { [weak self, weak canvas, weak window] response in
             guard let self else { return }
             self.isPresentingPanel = false
-            self.savePanel = nil
-            guard let canvas, let window, let panel else { return }
+            guard let canvas, let window else {
+                self.savePanel = nil
+                return
+            }
             if response == .OK, let url = panel.url {
                 // 先结束会话再写盘：写盘期间保持可交互会让取消/继续编辑静默覆盖保存结果；
                 // 成败都必须回调宿主，否则会话对象会滞留在控制器里导致后续截图失效
@@ -213,7 +218,7 @@ public final class CaptureSession {
                 DispatchQueue.global(qos: .userInitiated).async {
                     let failure: Error?
                     do {
-                        try ImageExporter.write(image, to: url)
+                        try ImageExporter.write(image, to: url, jpegQuality: AppSettings.shared.jpegQuality)
                         failure = nil
                     } catch {
                         failure = error
@@ -230,6 +235,7 @@ public final class CaptureSession {
                 window.makeKeyAndOrderFront(nil)
                 window.makeFirstResponder(canvas)
             }
+            self.savePanel = nil
         }
     }
 

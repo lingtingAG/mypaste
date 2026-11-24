@@ -3,14 +3,25 @@ import MyPasteCore
 
 @MainActor
 public final class CaptureController {
+    private enum CaptureState {
+        case idle
+        case capturing
+        /// 抓屏已完成、正在弹提示 / 建立覆盖窗：模态循环期间必须继续拒绝重入
+        case presenting
+    }
+
     public var pinBoard: PinBoard?
 
-    private let service = ScreenCaptureService()
+    private let environment: CaptureEnvironment
     private var session: CaptureSession?
-    private var isCapturing = false
+    private var state: CaptureState = .idle
+    private var captureTask: Task<Void, Never>?
+    /// 超时 / 取消会递增代次并取消 Task；旧 Task 的 await 返回后必须先比对代次再执行任何副作用
+    private var captureGeneration: UInt64 = 0
 
-    public init(pinBoard: PinBoard? = nil) {
+    public init(pinBoard: PinBoard? = nil, environment: CaptureEnvironment = CaptureEnvironment()) {
         self.pinBoard = pinBoard
+        self.environment = environment
     }
 
     public var isSessionActive: Bool {
@@ -18,78 +29,113 @@ public final class CaptureController {
     }
 
     public func captureRegion() {
-        guard session == nil, !isCapturing else { return }
-        guard ensurePermission() else { return }
-        isCapturing = true
-        Task { [weak self] in
+        beginCapture { [weak self] generation in
             guard let self else { return }
-            do {
-                let batch = try await self.service.captureAllScreens()
-                self.isCapturing = false
-                self.warnUnmappedScreens(batch.unmappedScreenCount)
-                self.presentSession(screens: batch.screens, mode: .edit)
-            } catch {
-                self.isCapturing = false
-                self.handleCaptureError(error)
-            }
+            let batch = try await self.environment.service.captureAllScreens()
+            guard self.isCurrentCapture(generation) else { return }
+            self.state = .presenting
+            self.warnIncompleteScreens(batch.incompleteScreenCount)
+            self.presentSession(screens: batch.screens, mode: .edit)
         }
     }
 
     public func openColorPicker() {
-        guard session == nil, !isCapturing else { return }
-        guard ensurePermission() else { return }
-        isCapturing = true
-        Task { [weak self] in
+        beginCapture { [weak self] generation in
             guard let self else { return }
-            do {
-                let batch = try await self.service.captureAllScreens()
-                self.isCapturing = false
-                self.warnUnmappedScreens(batch.unmappedScreenCount)
-                self.presentSession(screens: batch.screens, mode: .colorPicker)
-            } catch {
-                self.isCapturing = false
-                self.handleCaptureError(error)
-            }
+            let batch = try await self.environment.service.captureAllScreens()
+            guard self.isCurrentCapture(generation) else { return }
+            self.state = .presenting
+            self.warnIncompleteScreens(batch.incompleteScreenCount)
+            self.presentSession(screens: batch.screens, mode: .colorPicker)
         }
     }
 
-    private func warnUnmappedScreens(_ count: Int) {
+    public func captureFullScreen(autoSave: Bool = true) {
+        beginCapture { [weak self] generation in
+            guard let self else { return }
+            let captured = try await self.environment.service.captureScreen(under: NSEvent.mouseLocation)
+            guard self.isCurrentCapture(generation) else { return }
+            PasteboardWriter.writeImage(captured.image, to: self.environment.pasteboard)
+            let result = CaptureResult(
+                image: captured.image,
+                screen: captured.screen,
+                screenRect: captured.screen.frame,
+                scale: captured.scale
+            )
+            self.archive(result, autoSave: autoSave)
+            self.playSound()
+            AppNotice.show(title: "已截取全屏并复制", duration: 1.8, dedupe: false)
+        }
+    }
+
+    /// 所有截图入口共用：权限弹窗之前就进入 capturing，模态循环期间不会重入；
+    /// defer 排在 presentSession / 弹窗之后，保证任何路径都复位状态。
+    /// work 收到本次代次，必须在每个 await 返回后自行调用 isCurrentCapture 截断。
+    private func beginCapture(_ work: @escaping @MainActor (UInt64) async throws -> Void) {
+        guard session == nil, state == .idle else { return }
+        state = .capturing
+        guard ensurePermission() else {
+            state = .idle
+            return
+        }
+        captureGeneration &+= 1
+        let generation = captureGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.captureGeneration == generation {
+                    self.state = .idle
+                    self.captureTask = nil
+                }
+            }
+            do {
+                try await work(generation)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.isCurrentCapture(generation) else { return }
+                self.handleCaptureError(error)
+            }
+        }
+        captureTask = task
+        // SCScreenshotManager 不响应 Task 取消，卡住时靠状态复位让后续截图仍可用；
+        // 旧 Task 若最终返回，由 isCurrentCapture 截断全部副作用，defer 也不会清掉新任务状态
+        let timeout = environment.timeoutNanoseconds
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: timeout)
+            guard let self, self.state == .capturing, self.captureGeneration == generation else { return }
+            task.cancel()
+            self.captureGeneration &+= 1
+            self.captureTask = nil
+            self.state = .idle
+            AppNotice.show(title: "截图超时", detail: "屏幕采集未响应，请重试。", duration: 3, dedupe: false)
+        }
+    }
+
+    /// 超时守护 / cancelActiveSession 都会递增代次并取消 Task。
+    /// 旧 Task 若不在 await 后截断，会写剪贴板、建会话，甚至把状态留在 .presenting，
+    /// 而其 defer 因代次不匹配不复位，导致后续截图全部被拦截。
+    private func isCurrentCapture(_ generation: UInt64) -> Bool {
+        !Task.isCancelled && captureGeneration == generation
+    }
+
+    private func warnIncompleteScreens(_ count: Int) {
         guard count > 0 else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "部分显示器未能冻结"
-        alert.informativeText = "\(count) 块显示器无法匹配到系统采集源，本次截图只覆盖其余屏幕。"
+        alert.informativeText = "\(count) 块显示器无法冻结，本次截图只覆盖其余屏幕。"
         alert.addButton(withTitle: "继续")
+        alert.window.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         NSApp.activate()
         alert.runModal()
     }
 
-    public func captureFullScreen() {
-        guard session == nil, !isCapturing else { return }
-        guard ensurePermission() else { return }
-        isCapturing = true
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let captured = try await self.service.captureScreen(under: NSEvent.mouseLocation)
-                self.isCapturing = false
-                PasteboardWriter.writeImage(captured.image)
-                let result = CaptureResult(
-                    image: captured.image,
-                    screen: captured.screen,
-                    screenRect: captured.screen.frame,
-                    scale: captured.scale
-                )
-                self.archive(result, autoSave: true)
-                self.playSound()
-            } catch {
-                self.isCapturing = false
-                self.handleCaptureError(error)
-            }
-        }
-    }
-
     public func cancelActiveSession() {
+        captureTask?.cancel()
+        captureTask = nil
+        captureGeneration &+= 1
+        state = .idle
         session?.cancel()
     }
 
@@ -101,9 +147,10 @@ public final class CaptureController {
             callbacks: CaptureSession.Callbacks(
                 onCopy: { [weak self] result in
                     guard let self else { return }
-                    PasteboardWriter.writeImage(result.image)
+                    PasteboardWriter.writeImage(result.image, to: self.environment.pasteboard)
                     self.archive(result, autoSave: true)
                     self.playSound()
+                    AppNotice.show(title: "已复制到剪贴板", duration: 1.8, dedupe: false)
                 },
                 onPin: { [weak self] result in
                     guard let self else { return }
@@ -115,11 +162,18 @@ public final class CaptureController {
                     )
                     self.archive(result, autoSave: true)
                     self.playSound()
+                    AppNotice.show(title: "已贴图", duration: 1.8, dedupe: false)
                 },
-                onSaved: { [weak self] result, _ in
+                onSaved: { [weak self] result, url in
                     guard let self else { return }
                     self.archive(result, autoSave: false)
                     self.playSound()
+                    AppNotice.show(
+                        title: "已保存截图",
+                        detail: url.lastPathComponent,
+                        duration: 1.8,
+                        dedupe: false
+                    )
                 },
                 onSaveFailed: { [weak self] error in
                     guard let self else { return }
@@ -141,9 +195,11 @@ public final class CaptureController {
     }
 
     private func ensurePermission() -> Bool {
-        if service.hasPermission { return true }
+        if environment.service.hasPermission { return true }
         NSApp.activate()
-        if service.requestPermission() { return true }
+        // CGRequestScreenCaptureAccess 只负责弹授权框，TCC 生效通常需要重启进程；
+        // 同步返回值不能当成本次可抓屏的依据，否则随后 hasPermission 会再抛一次权限错误
+        _ = environment.service.requestPermission()
         presentPermissionAlert()
         return false
     }
@@ -181,9 +237,17 @@ public final class CaptureController {
     }
 
     private func archive(_ result: CaptureResult, autoSave: Bool) {
-        let shouldAutoSave = autoSave && AppSettings.shared.autoSave
-        let directory = AppSettings.shared.saveDirectory
-        let url = directory.appendingPathComponent(ImageExporter.timestampedFileName())
+        // @MainActor 属性不能从后台队列读取，先取成局部引用再传入闭包
+        let settings = environment.settings
+        let historyStore = environment.historyStore
+        let shouldAutoSave = autoSave && settings.autoSave
+        let directory = settings.saveDirectory
+        let format = settings.saveFormat
+        let jpegQuality = settings.jpegQuality
+        // 历史库始终存 PNG；自动保存按设置的格式另编码一次
+        let url = directory.appendingPathComponent(
+            ImageExporter.timestampedFileName(fileExtension: format.fileExtension)
+        )
         let image = result.image
         DispatchQueue.global(qos: .utility).async { [weak self] in
             // PNG 只编码一次，历史记录与自动保存复用同一份数据
@@ -193,7 +257,7 @@ public final class CaptureController {
                 }
                 return
             }
-            HistoryStore.shared.record(image, pngData: png, onError: { error in
+            historyStore.record(image, pngData: png, onError: { error in
                 DispatchQueue.main.async {
                     self?.presentArchiveError(error)
                 }
@@ -204,8 +268,20 @@ public final class CaptureController {
             })
             guard shouldAutoSave else { return }
             do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                try png.write(to: url, options: .atomic)
+                let data: Data
+                if format == .png {
+                    data = png
+                } else {
+                    guard let encoded = ImageExporter.data(
+                        for: image,
+                        fileExtension: format.fileExtension,
+                        jpegQuality: jpegQuality
+                    ) else {
+                        throw ImageExporter.ExportError.encodingFailed
+                    }
+                    data = encoded
+                }
+                try SecureFileWriter.write(data, to: url)
             } catch {
                 DispatchQueue.main.async {
                     self?.presentArchiveError(error)
@@ -248,7 +324,7 @@ public final class CaptureController {
     }
 
     private func playSound() {
-        guard AppSettings.shared.playSound else { return }
+        guard environment.settings.playSound else { return }
         NSSound(named: "Tink")?.play()
     }
 }
