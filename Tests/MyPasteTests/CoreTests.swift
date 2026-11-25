@@ -503,6 +503,19 @@ final class CoreTests: XCTestCase {
         )
     }
 
+    func testSweepOrphanThumbnailsReportsDirectoryReadError() throws {
+        // 历史根目录被同名普通文件占用：目录读不出来，必须上报而不是伪装成"清理成功"
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: root.path, contents: Data([0]))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        XCTAssertThrowsError(
+            try store.sweepOrphanThumbnails(),
+            "目录不可读时必须上报错误，不能静默当作清理成功"
+        )
+    }
+
     func testHistoryClearReportsDeletionFailureAndRemovesOrphans() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)

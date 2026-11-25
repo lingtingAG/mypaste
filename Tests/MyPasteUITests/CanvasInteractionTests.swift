@@ -98,7 +98,7 @@ final class CanvasInteractionTests: XCTestCase {
         } else {
             XCTFail("Expected number annotation")
         }
-        press("x", keyCode: 7, modifiers: .command)
+        press("k", keyCode: 40, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         XCTAssertTrue(canvas.annotations.isEmpty)
     }
@@ -335,7 +335,7 @@ final class CanvasInteractionTests: XCTestCase {
         }
         XCTAssertEqual(rect.width, rect.height, accuracy: 0.5)
 
-        press("a", keyCode: 0, modifiers: .command)
+        press("j", keyCode: 38, modifiers: .command)
         sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 300), clickCount: 1, modifiers: .shift)
         sendMouse(.leftMouseDragged, at: CGPoint(x: 300, y: 320), clickCount: 1, modifiers: .shift)
         sendMouse(.leftMouseUp, at: CGPoint(x: 300, y: 320), clickCount: 1, modifiers: .shift)

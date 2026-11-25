@@ -410,17 +410,17 @@ public final class EditorToolbarView: NSView {
         widthButtons = Self.widths.map { WidthDotButton(width: $0) }
         undoButton = ToolbarButton(
             symbolNames: ["arrow.uturn.backward"],
-            tooltip: "撤销 (⌘Z)",
+            tooltip: "撤销\(Self.shortcutHint(for: .undo))",
             accessibilityLabel: "撤销"
         )
         redoButton = ToolbarButton(
             symbolNames: ["arrow.uturn.forward"],
-            tooltip: "重做 (⇧⌘Z)",
+            tooltip: "重做\(Self.shortcutHint(for: .redo))",
             accessibilityLabel: "重做"
         )
         fillButton = ToolbarButton(
             symbolNames: ["square.fill"],
-            tooltip: "填充形状 (⌘F)",
+            tooltip: "填充形状\(Self.shortcutHint(for: .toggleFill))",
             accessibilityLabel: "填充形状"
         )
         fontSizeButton = FontSizeButton(fontSize: AppSettings.shared.toolFontSize)
@@ -462,6 +462,12 @@ public final class EditorToolbarView: NSView {
     /// 工具按钮中符号解析失败的个数（回归测试：符号缺失会显示成系统本地化名称）
     var missingToolSymbolCount: Int {
         toolButtons.values.filter { $0.image == nil }.count
+    }
+
+    /// 按钮提示文案（回归测试：撤销 / 重做等提示必须来自命令表，不能硬编码）
+    var buttonTooltips: [String] {
+        [undoButton, redoButton, fillButton].map { $0.toolTip ?? "" }
+            + toolButtons.values.map { $0.toolTip ?? "" }
     }
 
     public override func draw(_ dirtyRect: NSRect) {
@@ -536,9 +542,9 @@ public final class EditorToolbarView: NSView {
         row1.setCustomSpacing(8, after: redoButton)
         row1.addArrangedSubview(separator())
 
-        let copyButton = ToolbarButton(symbolNames: ["doc.on.doc"], tooltip: "复制 (⌘C)", accessibilityLabel: "复制")
-        let saveButton = ToolbarButton(symbolNames: ["square.and.arrow.down"], tooltip: "保存 (⌘S)", accessibilityLabel: "保存")
-        let pinButton = ToolbarButton(symbolNames: ["pin"], tooltip: "贴图 (⌘P)", accessibilityLabel: "贴图")
+        let copyButton = ToolbarButton(symbolNames: ["doc.on.doc"], tooltip: "复制\(Self.shortcutHint(for: .copy))", accessibilityLabel: "复制")
+        let saveButton = ToolbarButton(symbolNames: ["square.and.arrow.down"], tooltip: "保存\(Self.shortcutHint(for: .save))", accessibilityLabel: "保存")
+        let pinButton = ToolbarButton(symbolNames: ["pin"], tooltip: "贴图\(Self.shortcutHint(for: .pin))", accessibilityLabel: "贴图")
         let closeButton = ToolbarButton(symbolNames: ["xmark"], tooltip: "取消 (Esc)", accessibilityLabel: "取消")
         copyButton.isAccent = true
         copyButton.target = self
@@ -622,10 +628,11 @@ public final class EditorToolbarView: NSView {
         ToolbarSeparator()
     }
 
-    /// ⌘⇧F：弹出字号菜单
+    /// 组合键路径：弹出字号菜单。
+    /// 弹出位置要用**字号按钮自身**的坐标（原实现把工具栏坐标当窗口坐标用，菜单会弹偏）。
     public func presentFontSizeMenu() {
-        let center = NSPoint(x: bounds.midX, y: bounds.midY)
-        fontSizeButton.presentMenu(at: fontSizeButton.convert(center, from: nil))
+        let center = NSPoint(x: fontSizeButton.bounds.midX, y: fontSizeButton.bounds.midY)
+        fontSizeButton.presentMenu(at: center)
     }
 
     private static func symbolNames(for tool: Tool) -> [String] {
@@ -644,21 +651,17 @@ public final class EditorToolbarView: NSView {
         }
     }
 
-    /// 每个工具的 ⌘ 组合键；与 SelectionCanvasView.handleCommandShortcut 一一对应
+    /// 工具与动作的组合键提示：直接读 SelectionCanvasView 的命令表，不会与实际响应脱节
     private static func toolShortcutHint(for tool: Tool) -> String {
-        switch tool {
-        case .move: return " (⌘V)"
-        case .rectangle: return " (⌘R)"
-        case .ellipse: return " (⌘E)"
-        case .arrow: return " (⌘A)"
-        case .pen: return " (⌘B)"
-        case .marker: return " (⌘I)"
-        case .text: return " (⌘T)"
-        case .mosaic: return " (⌘D)"
-        case .blur: return " (⌘U)"
-        case .number: return " (⌘N)"
-        case .eraser: return " (⌘X)"
+        shortcutHint(for: .tool(tool))
+    }
+
+    private static func shortcutHint(for command: SelectionCanvasView.EditorCommand) -> String {
+        guard let entry = SelectionCanvasView.commandShortcuts.first(where: { $0.command == command }) else {
+            return ""
         }
+        let label = SelectionCanvasView.shortcutLabel(key: entry.key, modifiers: entry.modifiers)
+        return " (\(label))"
     }
 
     @objc private func toolClicked(_ sender: NSButton) {

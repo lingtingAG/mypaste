@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import XCTest
 @testable import MyPasteCore
 @testable import MyPasteUI
@@ -80,6 +81,124 @@ final class Version13Tests: XCTestCase {
         XCTAssertGreaterThan(origin.x, originBefore.x, "拖动结束后文字位置应落到已提交集合")
     }
 
+    // MARK: - 快捷键与主菜单的冲突
+
+    func testEditorShortcutsDoNotCollideWithMainMenu() throws {
+        // 字符串层面的比对：编辑器组合键不得与主菜单撞车。
+        // 真实分发路径由 testMainMenuDoesNotConsumeEditorShortcuts 覆盖
+        // （直接问菜单「这个组合你吃吗」）。
+        let menu = AppDelegate.makeMainMenu(target: nil)
+        var menuCombos: Set<String> = []
+        for item in menu.items {
+            guard let submenu = item.submenu else { continue }
+            for entry in submenu.items where !entry.keyEquivalent.isEmpty {
+                menuCombos.insert("\(entry.keyEquivalent.lowercased())|\(entry.keyEquivalentModifierMask.rawValue)")
+            }
+        }
+
+        // 这三个是安全共享：菜单动作与画布动作完全一致
+        // （复制 ⌘C → 画布 copy(_:)，撤销 ⌘Z / 重做 ⇧⌘Z → 画布 undo(_:)/redo(_:)）
+        let sharedWithSameAction: Set<String> = [
+            "c|\(NSEvent.ModifierFlags.command.rawValue)",
+            "z|\(NSEvent.ModifierFlags.command.rawValue)",
+            "z|\(NSEvent.ModifierFlags([.command, .shift]).rawValue)",
+        ]
+
+        for entry in SelectionCanvasView.commandShortcuts {
+            let combo = "\(entry.key)|\(entry.modifiers.rawValue)"
+            if sharedWithSameAction.contains(combo) { continue }
+            XCTAssertFalse(
+                menuCombos.contains(combo),
+                "编辑器组合键与主菜单冲突：\(SelectionCanvasView.shortcutLabel(key: entry.key, modifiers: entry.modifiers))"
+            )
+        }
+    }
+
+    func testMainMenuDoesNotConsumeEditorShortcuts() throws {
+        // 真实分发路径：主菜单的快捷键在事件进入第一响应者之前就被消费。
+        // 这里直接问菜单「这个组合你吃吗」，而不是比对字符串。
+        let menu = AppDelegate.makeMainMenu(target: nil)
+        let keyCodes: [Character: UInt16] = [
+            "s": 1, "d": 2, "f": 3, "z": 6, "c": 8, "b": 11, "e": 14, "r": 15,
+            "t": 17, "u": 32, "i": 34, "p": 35, "n": 45, "j": 38, "k": 40, "g": 5,
+            "l": 37,
+        ]
+        // 与菜单共享且动作一致：复制 / 撤销 / 重做
+        let sharedWithSameAction: Set<String> = [
+            "c|\(NSEvent.ModifierFlags.command.rawValue)",
+            "z|\(NSEvent.ModifierFlags.command.rawValue)",
+            "z|\(NSEvent.ModifierFlags([.command, .shift]).rawValue)",
+        ]
+
+        for entry in SelectionCanvasView.commandShortcuts {
+            let combo = "\(entry.key)|\(entry.modifiers.rawValue)"
+            if sharedWithSameAction.contains(combo) { continue }
+            guard let keyCode = keyCodes[entry.key.first!] else {
+                XCTFail("缺少键码映射：\(entry.key)")
+                continue
+            }
+            // 真实按键在带 Shift 时 characters 是大写（charactersIgnoringModifiers 仍是小写），
+            // 菜单匹配用的是 characters：构造错会让"菜单吃掉了组合键"变成假象
+            let typed = entry.modifiers.contains(.shift)
+                ? String(entry.key).uppercased()
+                : String(entry.key)
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: entry.modifiers,
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: typed,
+                charactersIgnoringModifiers: String(entry.key),
+                isARepeat: false,
+                keyCode: keyCode
+            ) else {
+                XCTFail("无法构造按键事件：\(entry.key)")
+                continue
+            }
+            XCTAssertFalse(
+                menu.performKeyEquivalent(with: event),
+                "主菜单会消费 \(SelectionCanvasView.shortcutLabel(key: entry.key, modifiers: entry.modifiers))，画布收不到"
+            )
+        }
+    }
+
+    func testSelectAllDoesNotWipeAnnotationsWhileEditing() throws {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
+        press("r", keyCode: 15, modifiers: .command)
+        drag(from: CGPoint(x: 150, y: 150), to: CGPoint(x: 300, y: 250))
+        XCTAssertEqual(canvas.annotations.count, 1)
+
+        // 编辑中触发「全选」不得清空标注与撤销栈
+        canvas.selectAll(nil)
+        XCTAssertEqual(canvas.annotations.count, 1, "编辑中全选不得丢弃标注")
+        XCTAssertTrue(canvas.undoStackCount > 0, "编辑中全选不得清空撤销栈")
+    }
+
+    // MARK: - 设置窗口的使用说明
+
+    func testUsageGuideRefreshesRightAfterRecordingShortcut() throws {
+        let suite = "com.mypaste.tests.prefs.v13"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        let controller = PreferencesWindowController(settings: settings, onHotkeysChanged: { [] })
+        _ = controller.makeSnapshotContentView()
+
+        let before = controller.usageIntroText
+        XCTAssertTrue(before.contains(settings.captureShortcut.displayString), "说明应包含当前截图快捷键")
+
+        // 模拟录制完成：新快捷键写入后说明必须立刻刷新，而不是等重新打开窗口
+        let recorded = Shortcut(keyCode: 37, modifiers: UInt32(cmdKey | optionKey))
+        controller.captureRecorder?.onRecord?(recorded)
+
+        let after = controller.usageIntroText
+        XCTAssertNotEqual(before, after, "录制新快捷键后使用说明必须立即刷新")
+        XCTAssertTrue(after.contains(recorded.displayString), "说明应包含刚录制的快捷键")
+        XCTAssertEqual(settings.captureShortcut, recorded)
+    }
+
     // MARK: - 工具栏外观
 
     func testToolbarContentFitsPanelAndAllSymbolsResolve() throws {
@@ -101,6 +220,12 @@ final class Version13Tests: XCTestCase {
         XCTAssertTrue(toolbar.contentFitsPanel, "工具栏内容不能溢出面板")
         // 符号解析失败时按钮会画出系统本地化名称（例如出现「格式」字样）
         XCTAssertEqual(toolbar.missingToolSymbolCount, 0, "所有工具按钮都必须有可用符号")
+
+        // 撤销 / 重做提示必须来自命令表，不能硬编码
+        let undoLabel = SelectionCanvasView.shortcutLabel(key: "z", modifiers: [.command])
+        let redoLabel = SelectionCanvasView.shortcutLabel(key: "z", modifiers: [.command, .shift])
+        XCTAssertTrue(toolbar.buttonTooltips.contains("撤销 (\(undoLabel))"), "撤销提示应来自命令表")
+        XCTAssertTrue(toolbar.buttonTooltips.contains("重做 (\(redoLabel))"), "重做提示应来自命令表")
     }
 
     // MARK: - 快捷键统一为 ⌘ 组合
@@ -121,6 +246,13 @@ final class Version13Tests: XCTestCase {
         XCTAssertEqual(canvas.tool, .marker)
         press("d", keyCode: 2, modifiers: .command)
         XCTAssertEqual(canvas.tool, .mosaic)
+        // 与编辑菜单撞车的三个工具改用主菜单未占用的字母：移动 / 箭头 / 橡皮擦
+        press("g", keyCode: 5, modifiers: .command)
+        XCTAssertEqual(canvas.tool, .move)
+        press("j", keyCode: 38, modifiers: .command)
+        XCTAssertEqual(canvas.tool, .arrow)
+        press("k", keyCode: 40, modifiers: .command)
+        XCTAssertEqual(canvas.tool, .eraser)
     }
 
     // MARK: - 贴图菜单：隐藏与删除是两件事
@@ -169,7 +301,7 @@ final class Version13Tests: XCTestCase {
         // 再加一个矩形压住文字，强制走「前段 + 拖动文字 + 后段」的分段路径
         press("r", keyCode: 15, modifiers: .command)
         drag(from: CGPoint(x: 180, y: 180), to: CGPoint(x: 320, y: 260))
-        press("v", keyCode: 9, modifiers: .command)
+        press("g", keyCode: 5, modifiers: .command)
 
         sendMouse(.leftMouseDown, at: CGPoint(x: 205, y: 205), clickCount: 1)
         sendMouse(.leftMouseDragged, at: CGPoint(x: 260, y: 240), clickCount: 1)

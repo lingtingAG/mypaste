@@ -118,15 +118,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     }
 
     private func setupMainMenu() {
+        NSApp.mainMenu = AppDelegate.makeMainMenu(target: self)
+    }
+
+    /// 主菜单构建。**internal** 便于回归测试枚举所有快捷键，
+    /// 检查编辑器的组合键是否与主菜单撞车（菜单快捷键在事件进入第一响应者前就被消费）。
+    /// `target` 传菜单项的响应者（AppDelegate 实例）；测试可传 nil。
+    static func makeMainMenu(target: AnyObject?) -> NSMenu {
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
         let about = NSMenuItem(title: "关于 MyPaste", action: #selector(showAbout), keyEquivalent: "")
-        about.target = self
+        about.target = target
         appMenu.addItem(about)
         let prefs = NSMenuItem(title: "设置…", action: #selector(showPreferences), keyEquivalent: ",")
-        prefs.target = self
+        prefs.target = target
         appMenu.addItem(prefs)
         appMenu.addItem(.separator())
         appMenu.addItem(NSMenuItem(title: "隐藏 MyPaste", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
@@ -167,7 +174,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
-        NSApp.mainMenu = mainMenu
+        return mainMenu
     }
 
     private func setupStatusItem() {

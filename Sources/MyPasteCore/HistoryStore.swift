@@ -309,9 +309,15 @@ public final class HistoryStore: @unchecked Sendable {
 
     /// 清理没有对应原图的孤儿缩略图（原图已删、缩略图删除失败的残留）。
     /// 返回第一个错误；调用方需在队列内调用。
+    /// 目录读取失败必须上报：静默返回会让「清理成功」变成假象。
     private func sweepOrphanThumbnailsOnQueue() -> Error? {
         var firstError: Error?
-        guard let urls = try? FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil) else {
+        let urls: [URL]
+        do {
+            urls = try FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil)
+        } catch {
+            // 目录还不存在视为无事可做；其它读取错误要如实上报
+            if !Self.isMissingFile(error) { return error }
             return nil
         }
         let suffixes = ["_thumb." + Self.thumbnailFileExtension, "_thumb." + Self.legacyThumbnailFileExtension]

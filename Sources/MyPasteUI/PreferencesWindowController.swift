@@ -24,7 +24,8 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
     private let onHotkeysChanged: () -> [String]
 
     private var window: PreferencesWindow?
-    private var captureRecorder: ShortcutRecorderButton?
+    /// internal：回归测试需要模拟录制完成
+    private(set) var captureRecorder: ShortcutRecorderButton?
     private var pinRecorder: ShortcutRecorderButton?
     private var fullScreenRecorder: ShortcutRecorderButton?
     private var hotkeyWarningLabel: NSTextField?
@@ -39,6 +40,9 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
     private var jpegQualityPopup: NSPopUpButton?
     private var permissionLabel: NSTextField?
     private var permissionButton: NSButton?
+    // 使用说明的说明行与快捷键表：快捷键被改动后要同步刷新
+    private var usageIntroLabel: NSTextField?
+    private var usageShortcutsLabel: NSTextField?
     private var appActiveObserver: NSObjectProtocol?
 
     public init(settings: AppSettings = .shared, onHotkeysChanged: @escaping () -> [String]) {
@@ -296,17 +300,19 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
     /// 「使用说明」章节：功能说明 + 截图编辑器 / 贴图窗口快捷键 + 隐藏与删除的区别
     private func makeUsageGuideSection() -> NSView {
-        let intro = NSTextField(wrappingLabelWithString: Self.usageIntro)
+        let intro = NSTextField(wrappingLabelWithString: "")
         intro.font = NSFont.systemFont(ofSize: 12, weight: .regular)
         intro.textColor = .labelColor
         intro.translatesAutoresizingMaskIntoConstraints = false
         intro.preferredMaxLayoutWidth = 520
+        usageIntroLabel = intro
 
-        let shortcuts = NSTextField(wrappingLabelWithString: Self.usageShortcuts)
+        let shortcuts = NSTextField(wrappingLabelWithString: "")
         shortcuts.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         shortcuts.textColor = .secondaryLabelColor
         shortcuts.translatesAutoresizingMaskIntoConstraints = false
         shortcuts.preferredMaxLayoutWidth = 520
+        usageShortcutsLabel = shortcuts
 
         let notes = NSTextField(wrappingLabelWithString: Self.usageNotes)
         notes.font = NSFont.systemFont(ofSize: 11.5, weight: .regular)
@@ -320,29 +326,68 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         )
     }
 
-    private static let usageIntro = """
-    MyPaste 常驻菜单栏，按 F1 截图、F3 贴图。截图、标注、贴图与历史记录全部在本机处理，\
-    不联网、不上传、无需账号。截图编辑器里的功能按钮都配有 ⌘ 组合键，按钮悬停可看到对应组合。
-    """
+    /// 使用说明里的说明行当前文本（回归测试用）
+    var usageIntroText: String { usageIntroLabel?.stringValue ?? "" }
 
-    private static let usageShortcuts = """
-    截图编辑器（覆盖层内）
-      ⌘V 移动    ⌘R 矩形    ⌘E 椭圆    ⌘A 箭头    ⌘B 画笔
-      ⌘I 荧光笔  ⌘T 文字    ⌘D 马赛克  ⌘U 模糊    ⌘N 序号
-      ⌘X 橡皮擦  ⌘C 复制    ⌘S 保存    ⌘P 贴图    ⌘F 填充形状
-      ⌘⇧F 字号   ⌘Z 撤销    ⌘⇧Z 重做   ⌘⇧C 复制颜色
-      Esc 取消    Delete 删除选中文字（无选中文字时撤销上一步）
+    /// 使用说明的文案：**从真实设置与命令表生成**，避免用户改过快捷键后说明失效
+    private func makeUsageIntroText() -> String {
+        let capture = settings.captureShortcut.displayString
+        let pin = settings.pinShortcut.displayString
+        return """
+        MyPaste 常驻菜单栏，按 \(capture) 截图、\(pin) 贴图。截图、标注、贴图与历史记录全部在本机处理，\
+        不联网、不上传、无需账号。截图编辑器里的功能按钮都配有组合键，按钮悬停可看到对应组合。
+        """
+    }
 
-    贴图窗口
-      ⌘C 复制    ⌘S 保存    ⌘⌫ 删除贴图    ⌘W 删除贴图    Esc 隐藏贴图
-    """
+    /// 截图编辑器快捷键：直接读 SelectionCanvasView 的命令表
+    private static var usageShortcuts: String {
+        var rows: [[String]] = []
+        var current: [String] = []
+        let entries = SelectionCanvasView.commandShortcuts.map { entry -> String in
+            let label = SelectionCanvasView.shortcutLabel(key: entry.key, modifiers: entry.modifiers)
+            return "\(label) \(Self.commandName(entry.command))"
+        }
+        for entry in entries {
+            current.append(entry)
+            if current.count == 4 {
+                rows.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty { rows.append(current) }
+
+        var text = "截图编辑器（覆盖层内）\n"
+        for row in rows {
+            text += "  " + row.map { $0.padding(toLength: 12, withPad: " ", startingAt: 0) }.joined() + "\n"
+        }
+        text += "  Esc 取消    Delete 删除选中文字（无选中文字时撤销上一步）\n"
+        text += "\n贴图窗口\n"
+        text += "  ⌘C 复制    ⌘S 保存    Delete 删除贴图    ⌘W 删除贴图    Esc 隐藏贴图"
+        return text
+    }
+
+    private static func commandName(_ command: SelectionCanvasView.EditorCommand) -> String {
+        switch command {
+        case let .tool(tool): return tool.title
+        case .copy: return "复制"
+        case .save: return "保存"
+        case .pin: return "贴图"
+        case .copyColor: return "复制颜色"
+        case .toggleFill: return "填充形状"
+        case .fontSize: return "字号"
+        case .undo: return "撤销"
+        case .redo: return "重做"
+        }
+    }
 
     private static let usageNotes = """
     贴图右键菜单里的「隐藏贴图」只是把贴图收起来，之后可从菜单栏「显示全部贴图」恢复；\
-    「删除贴图」会彻底移除这张贴图，不可恢复。取色器模式下单击屏幕即可复制颜色，Esc 退出。
+    「删除贴图」会彻底移除这张贴图，不可恢复。取色器模式下单击屏幕即可复制颜色，Esc 退出。\
+    选区一旦建立就不能再改（⌘A 只在未选区时选满整屏），要换区域请按 Esc 重新截图。
     """
 
-    private func displayPath(_ url: URL) -> String {        let home = FileManager.default.homeDirectoryForCurrentUser.path
+    private func displayPath(_ url: URL) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
         let path = url.path
         if path == home { return "~" }
         if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
@@ -399,6 +444,9 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
     }
 
     private func syncState() {
+        // 使用说明要跟着设置走：录制新快捷键或恢复默认后立刻刷新
+        usageIntroLabel?.stringValue = makeUsageIntroText()
+        usageShortcutsLabel?.stringValue = Self.usageShortcuts
         captureRecorder?.shortcut = settings.captureShortcut
         pinRecorder?.shortcut = settings.pinShortcut
         fullScreenRecorder?.shortcut = settings.fullScreenShortcut
@@ -476,6 +524,8 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         case .pin: settings.pinShortcut = shortcut
         case .fullScreen: settings.fullScreenShortcut = shortcut
         }
+        // 快捷键写成功后立刻刷新使用说明：说明里引用的就是当前快捷键
+        syncState()
         applyHotkeys()
     }
 

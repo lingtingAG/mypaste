@@ -516,43 +516,94 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         }
         if event.keyCode == 48 {
             if event.modifierFlags.contains(.shift) {
-                selectWholeScreen()
+                requestSelectWholeScreen()
             }
             return
         }
         super.keyDown(with: event)
     }
 
-    /// 截图编辑器的 ⌘ 组合键：工具栏每个按钮对应一个组合。
-    /// 组合表与 EditorToolbarView 的按钮提示、设置里的使用说明保持一致。
+    enum EditorCommand: Hashable {
+        case tool(Tool)
+        case copy
+        case save
+        case pin
+        case copyColor
+        case toggleFill
+        case fontSize
+        case undo
+        case redo
+    }
+
+    /// 编辑器命令表：组合键 → 动作。**唯一数据源**，
+    /// 快捷键响应、工具栏按钮提示、设置里的使用说明、回归测试都读它。
+    ///
+    /// 组合必须避开主菜单已占用的键：编辑菜单的 ⌘X/⌘C/⌘V/⌘A、应用菜单的 ⌘H/⌘Q/⌘,。
+    /// 主菜单的快捷键在事件进入第一响应者**之前**就被消费，撞车时画布根本收不到按键。
+    ///
+    /// 实测（AppKit 菜单匹配规则）：菜单项的修饰键掩码只要是事件修饰键的**子集**就算命中，
+    /// **额外的 Shift 不算避让**——所以 ⌘V 的变体 ⇧⌘V 同样会被「粘贴」吃掉。
+    /// 编辑菜单又不能删：没有它，文字输入框的 ⌘C/⌘V 会失效（实测只有 ⌘A 仍可用）。
+    /// 因此编辑器只能用空闲字母：移动 ⌘G / 箭头 ⌘J / 橡皮擦 ⌘K / 取色 ⌘L。
+    /// 复制 ⌘C、撤销 ⌘Z、重做 ⇧⌘Z 与菜单共享是安全的——菜单动作与画布动作完全一致。
+    static let commandShortcuts: [(command: EditorCommand, key: String, modifiers: NSEvent.ModifierFlags)] = [
+        (.tool(.move), "g", [.command]),
+        (.tool(.rectangle), "r", [.command]),
+        (.tool(.ellipse), "e", [.command]),
+        (.tool(.arrow), "j", [.command]),
+        (.tool(.pen), "b", [.command]),
+        (.tool(.marker), "i", [.command]),
+        (.tool(.text), "t", [.command]),
+        (.tool(.mosaic), "d", [.command]),
+        (.tool(.blur), "u", [.command]),
+        (.tool(.number), "n", [.command]),
+        (.tool(.eraser), "k", [.command]),
+        (.copy, "c", [.command]),
+        (.save, "s", [.command]),
+        (.pin, "p", [.command]),
+        (.copyColor, "l", [.command]),
+        (.toggleFill, "f", [.command]),
+        (.fontSize, "f", [.command, .shift]),
+        // 撤销 / 重做与编辑菜单共享同一组合与同一动作，列入表里才能在设置说明中一并列出
+        (.undo, "z", [.command]),
+        (.redo, "z", [.command, .shift]),
+    ]
+
+    /// 组合键的可读形式，如 ⇧⌘V
+    static func shortcutLabel(key: String, modifiers: NSEvent.ModifierFlags) -> String {
+        var label = ""
+        if modifiers.contains(.control) { label += "⌃" }
+        if modifiers.contains(.option) { label += "⌥" }
+        if modifiers.contains(.shift) { label += "⇧" }
+        if modifiers.contains(.command) { label += "⌘" }
+        return label + key.uppercased()
+    }
+
     private func handleCommandShortcut(_ event: NSEvent) -> Bool {
-        let characters = (event.charactersIgnoringModifiers ?? "").lowercased()
-        let shift = event.modifierFlags.contains(.shift)
-        switch characters {
-        case "v": selectTool(.move)
-        case "r": selectTool(.rectangle)
-        case "e": selectTool(.ellipse)
-        case "a": selectTool(.arrow)
-        case "b": selectTool(.pen)
-        case "i": selectTool(.marker)
-        case "t": selectTool(.text)
-        case "d": selectTool(.mosaic)
-        case "u": selectTool(.blur)
-        case "n": selectTool(.number)
-        case "x": selectTool(.eraser)
-        case "c" where shift: copyColorUnderCursor()
-        case "c":
-            if selection != nil { session?.canvasRequestCopy(self) }
-        case "s" where !shift:
-            if selection != nil { session?.canvasRequestSave(self) }
-        case "p" where !shift:
-            session?.canvasRequestPin(self)
-        case "f" where shift:
-            toolbar?.presentFontSizeMenu()
-        case "f":
-            toggleFillShape()
-        default:
+        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard let entry = Self.commandShortcuts.first(where: { $0.key == key && $0.modifiers == modifiers }) else {
             return false
+        }
+        switch entry.command {
+        case let .tool(tool):
+            selectTool(tool)
+        case .copy:
+            if selection != nil { session?.canvasRequestCopy(self) }
+        case .save:
+            if selection != nil { session?.canvasRequestSave(self) }
+        case .pin:
+            session?.canvasRequestPin(self)
+        case .copyColor:
+            copyColorUnderCursor()
+        case .toggleFill:
+            toggleFillShape()
+        case .fontSize:
+            toolbar?.presentFontSizeMenu()
+        case .undo:
+            undoLastAnnotation()
+        case .redo:
+            redoLastAnnotation()
         }
         return true
     }
@@ -642,10 +693,17 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     }
 
     public override func selectAll(_ sender: Any?) {
-        selectWholeScreen()
+        requestSelectWholeScreen()
     }
 
-    private func selectWholeScreen() {
+    /// 选满整屏：只在还没有选区时可用。
+    /// 编辑中改选区会连带丢掉标注与撤销栈，而 ⌘A 是肌肉记忆键，
+    /// 不能变成「误触即丢数据」的陷阱（编辑中请按 Esc 重新截图）。
+    private func requestSelectWholeScreen() {
+        guard selection == nil else {
+            showToast("编辑中不能改选区，请按 Esc 重新截图")
+            return
+        }
         selection = bounds
         annotations.removeAll()
         undoStack.removeAll()
@@ -1441,6 +1499,9 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         }
         context.restoreGState()
     }
+
+    /// 撤销栈深度（回归测试：编辑中「全选整屏」不得清空撤销栈）
+    var undoStackCount: Int { undoStack.count }
 
     /// 选区几何正在变化：位图缓存的键包含完整选区，此时命中不了，直接实时绘制
     private var isSelectionGeometryChanging: Bool {
