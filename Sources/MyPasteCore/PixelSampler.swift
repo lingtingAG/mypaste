@@ -42,9 +42,15 @@ public final class PixelSampler {
         return context != nil
     }
 
-    /// 常驻采样缓冲的像素数：按需采样固定为 1，与源图尺寸无关。
-    /// 用于回归测试锁定「不再按整屏分配缓冲」这一约束。
-    var residentPixelCount: Int { 1 }
+    /// 常驻采样缓冲的**实际**像素数：按需采样为 1×1，与源图尺寸无关。
+    /// 必须返回真实占用而非常量，否则"有人把整屏缓冲改回来"时回归测试仍会通过，
+    /// 等于没有守住约束（回归测试要可证伪）。
+    var residentPixelCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let context else { return 0 }
+        return context.width * context.height
+    }
 
     public func color(at point: CGPoint) -> RGBAColor? {
         // 先判负再截断：Int() 向零截断会让 -0.5 通过边界检查并误采样第 0 列

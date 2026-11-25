@@ -22,7 +22,8 @@ private final class PinWindow: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-private final class PinContentView: NSView {
+// internal：回归测试需要读取右键菜单项（隐藏 / 删除 的区分）
+final class PinContentView: NSView {
     var image: CGImage
     var originalText: String?
     var onClose: (() -> Void)?
@@ -254,8 +255,13 @@ private final class PinContentView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 || event.keyCode == 51 {
-            closePin()
+        if event.keyCode == 53 {
+            // Esc：收起贴图（可从菜单栏恢复），不误删
+            hidePin()
+            return
+        }
+        if event.keyCode == 51 {
+            deletePin()
             return
         }
         if event.modifierFlags.contains(.command) {
@@ -267,7 +273,7 @@ private final class PinContentView: NSView {
                 saveImage()
                 return
             case "w":
-                closePin()
+                deletePin()
                 return
             default:
                 break
@@ -320,7 +326,8 @@ private final class PinContentView: NSView {
 
     // MARK: - Actions
 
-    private func makeContextMenu() -> NSMenu {
+    /// 贴图右键菜单（internal 便于回归测试断言菜单项）
+    func makeContextMenu() -> NSMenu {
         let menu = NSMenu()
         let copy = NSMenuItem(title: originalText == nil ? "复制图片" : "复制文本", action: #selector(copyForUser), keyEquivalent: "c")
         copy.target = self
@@ -379,13 +386,30 @@ private final class PinContentView: NSView {
         menu.addItem(info)
         menu.addItem(.separator())
 
-        let hide = NSMenuItem(title: "隐藏贴图", action: #selector(hidePin), keyEquivalent: "h")
+        // 隐藏与删除是两件事：隐藏只是收起来，可从菜单栏「显示全部贴图」恢复；
+        // 删除是彻底移除该贴图，不可恢复
+        let hide = NSMenuItem(
+            title: "隐藏贴图（可从菜单栏恢复）",
+            action: #selector(hidePin),
+            keyEquivalent: "h"
+        )
         hide.target = self
+        hide.toolTip = "暂时收起这张贴图，之后可从菜单栏「显示全部贴图」恢复"
         menu.addItem(hide)
-        let close = NSMenuItem(title: "关闭贴图", action: #selector(closePin), keyEquivalent: "\u{1b}")
-        close.target = self
-        menu.addItem(close)
+        let delete = NSMenuItem(
+            title: "删除贴图",
+            action: #selector(deletePin),
+            keyEquivalent: "\u{8}"
+        )
+        delete.target = self
+        delete.toolTip = "彻底移除这张贴图，不可恢复"
+        menu.addItem(delete)
         return menu
+    }
+
+    /// 删除贴图：关闭窗口并从贴图板移除，不可恢复（与「隐藏贴图」不同）
+    @objc func deletePin() {
+        closePin()
     }
 
     @objc func copy(_ sender: Any?) {

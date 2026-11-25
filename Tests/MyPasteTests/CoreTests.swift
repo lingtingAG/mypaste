@@ -451,6 +451,40 @@ final class CoreTests: XCTestCase {
         XCTAssertLessThan(jpegData.count, pngData.count / 2, "JPEG 缩略图应显著小于 PNG")
     }
 
+    func testHistoryRecognizesLegacyPNGThumbnail() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 60, height: 40)
+        // 正常写入一条（新版是 JPEG 缩略图）
+        let entry = try store.recordSync(image, limit: 10)
+        XCTAssertEqual(entry.thumbnailURL.pathExtension.lowercased(), "jpg")
+
+        // 模拟旧版本留下的 _thumb.png：把 JPEG 缩略图改名为 legacy PNG
+        let legacyThumb = entry.thumbnailURL
+            .deletingPathExtension()
+            .appendingPathExtension("png")
+        try FileManager.default.moveItem(at: entry.thumbnailURL, to: legacyThumb)
+
+        // 列表必须识别出旧版缩略图，并把它的字节计入预算
+        let listed = try XCTUnwrap(store.entries().first)
+        XCTAssertEqual(listed.thumbnailURL.lastPathComponent, legacyThumb.lastPathComponent)
+        XCTAssertGreaterThan(listed.thumbnailFileSize, 0, "旧版缩略图字节必须计入磁盘预算")
+
+        // 删除条目时旧版缩略图也要一起删掉
+        store.delete(listed)
+        let deleted = expectation(description: "history change after delete")
+        let observer = NotificationCenter.default.addObserver(
+            forName: .myPasteHistoryDidChange,
+            object: store,
+            queue: .main
+        ) { _ in deleted.fulfill() }
+        wait(for: [deleted], timeout: 5)
+        NotificationCenter.default.removeObserver(observer)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyThumb.path))
+    }
+
     func testHistorySweepRemovesOrphanThumbnail() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
@@ -679,6 +713,45 @@ final class CoreTests: XCTestCase {
             failed.fulfill()
         })
         wait(for: [failed], timeout: 5)
+    }
+
+    func testHistoryRecordReportsThumbnailWriteError() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyPasteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HistoryStore(rootURL: root)
+        let image = try makeTestImage(width: 40, height: 30)
+
+        // 只让缩略图（.jpg）写盘失败：原图必须照常入库，且失败不能被静默吞掉
+        let originalSetter = SecureFileWriter.attributeSetter
+        SecureFileWriter.attributeSetter = { path, attributes in
+            if path.hasSuffix(".jpg") {
+                throw NSError(domain: "MyPasteTests", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "注入的缩略图写入失败"
+                ])
+            }
+            try originalSetter(path, attributes)
+        }
+        defer { SecureFileWriter.attributeSetter = originalSetter }
+
+        let recorded = expectation(description: "record completion")
+        let thumbnailFailed = expectation(description: "thumbnail error")
+        store.record(
+            image,
+            limit: 10,
+            completion: { entry in
+                XCTAssertNotNil(entry, "缩略图失败不影响原图入库")
+                XCTAssertEqual(entry?.thumbnailFileSize, 0, "未落盘的缩略图不计入预算")
+                recorded.fulfill()
+            },
+            onError: { error in
+                XCTFail("主记录不应失败：\(error)")
+            },
+            onThumbnailError: { _ in
+                thumbnailFailed.fulfill()
+            }
+        )
+        wait(for: [recorded, thumbnailFailed], timeout: 5)
     }
 
     func testHistoryPruneAsyncReportsIOError() throws {
@@ -1103,14 +1176,16 @@ final class CoreTests: XCTestCase {
         let image = try makeTestImage(width: 24, height: 16)
         let sampler = PixelSampler(image: image)
         let point = CGPoint(x: 7, y: 3)
-        // v1.3：按需单像素采样，常驻缓冲固定 1 像素，不再随源图尺寸增长
-        XCTAssertEqual(sampler.residentPixelCount, 1)
+        // v1.3：按需单像素采样，常驻缓冲与源图尺寸无关。
+        // 断言用真实占用（≤1 像素），不能写成恒真常量——那样把整屏缓冲改回来也测不出来
+        XCTAssertEqual(sampler.residentPixelCount, 0, "未采样前不应持有任何缓冲")
         // 查询状态不得改变状态：isPrepared 必须是纯读，不能顺带创建上下文
         XCTAssertFalse(sampler.isPrepared)
         XCTAssertFalse(sampler.isPrepared, "重复查询不应创建采样上下文")
         // 未 prepare 时也必须能正确取色（采样按需进行，不依赖后台预热）
         let sampled = try XCTUnwrap(sampler.color(at: point))
         XCTAssertTrue(sampler.isPrepared)
+        XCTAssertLessThanOrEqual(sampler.residentPixelCount, 1, "按需采样常驻缓冲必须是 1 像素")
         // 与参考实现（单像素裁剪采样）一致
         let reference = try XCTUnwrap(AnnotationRenderer.averageColor(of: image, at: point))
         XCTAssertEqual(sampled.red, reference.red, accuracy: 0.01)

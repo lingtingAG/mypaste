@@ -67,6 +67,7 @@ public final class HistoryStore: @unchecked Sendable {
     ///   - pngData: 调用方已编码的 PNG，传入可复用编码结果；为 nil 时内部编码
     ///   - onError: 记录写入失败回调（主线程），不要静默失败
     ///   - onPruneError: 旧记录清理失败回调（主线程）。本次记录已成功，文案必须与写入失败区分
+    ///   - onThumbnailError: 缩略图写入失败回调（主线程）。原图已入库，失败只影响网格预览速度
     /// 异步接口没有同步返回值，结果只经 completion 交付
     public func record(
         _ image: CGImage,
@@ -75,13 +76,15 @@ public final class HistoryStore: @unchecked Sendable {
         diskLimitMB: Int? = nil,
         completion: ((HistoryEntry?) -> Void)? = nil,
         onError: ((Error) -> Void)? = nil,
-        onPruneError: ((Error) -> Void)? = nil
+        onPruneError: ((Error) -> Void)? = nil,
+        onThumbnailError: ((Error) -> Void)? = nil
     ) {
         let effectiveLimit = limit ?? AppSettings.shared.historyLimit
         let effectiveDiskLimit = diskLimitMB ?? AppSettings.shared.historyDiskLimitMB
         queue.async { [weak self] in
             guard let self else { return }
             var pruneError: Error?
+            var thumbnailError: Error?
             do {
                 // 清理旧条目的 IO 失败不影响本次写入结果，单独作为错误上报
                 let entry = try self.recordOnQueue(
@@ -89,11 +92,13 @@ public final class HistoryStore: @unchecked Sendable {
                     pngData: pngData,
                     limit: effectiveLimit,
                     diskLimitMB: effectiveDiskLimit,
-                    onPruneError: { pruneError = $0 }
+                    onPruneError: { pruneError = $0 },
+                    onThumbnailError: { thumbnailError = $0 }
                 )
                 DispatchQueue.main.async {
                     completion?(entry)
                     if let pruneError { onPruneError?(pruneError) }
+                    if let thumbnailError { onThumbnailError?(thumbnailError) }
                     NotificationCenter.default.post(name: .myPasteHistoryDidChange, object: self)
                 }
             } catch {
@@ -123,7 +128,8 @@ public final class HistoryStore: @unchecked Sendable {
         pngData: Data?,
         limit: Int?,
         diskLimitMB: Int?,
-        onPruneError: ((Error) -> Void)? = nil
+        onPruneError: ((Error) -> Void)? = nil,
+        onThumbnailError: ((Error) -> Void)? = nil
     ) throws -> HistoryEntry {
         try SecureFileWriter.ensurePrivateDirectory(at: rootURL)
         let now = Date()
@@ -142,12 +148,14 @@ public final class HistoryStore: @unchecked Sendable {
         var thumbnailSize: Int64 = 0
         if let thumb = Self.makeThumbnail(image, maxPixel: Self.thumbnailMaxPixel),
            let thumbData = ImageExporter.jpegData(thumb, quality: Self.thumbnailJPEGQuality) {
-            // 缩略图写入失败不阻断主记录，但预算只统计实际落盘的字节
+            // 缩略图写入失败不阻断主记录，但预算只统计实际落盘的字节；
+            // 失败必须上报，不能静默：网格会退回"从原图降采样"，预览会变慢
             do {
                 try SecureFileWriter.write(thumbData, to: thumbnailURL)
                 thumbnailSize = Int64(thumbData.count)
             } catch {
                 thumbnailSize = 0
+                onThumbnailError?(error)
             }
         }
 

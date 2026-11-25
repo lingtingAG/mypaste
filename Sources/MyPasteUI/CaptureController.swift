@@ -291,6 +291,18 @@ public final class CaptureController {
                     DispatchQueue.main.async {
                         self?.presentHistoryPruneError(error)
                     }
+                },
+                onThumbnailError: { error in
+                    // 原图已入库，只是缩略图没写成：不影响截图结果，用非模态提示告知
+                    DispatchQueue.main.async {
+                        AppNotice.show(
+                            title: "历史缩略图写入失败",
+                            detail: "截图已保存到历史记录，但缩略图写入失败，历史网格预览会变慢。",
+                            duration: 3,
+                            dedupe: true
+                        )
+                        NSLog("MyPaste thumbnail write failed: %@", error.localizedDescription)
+                    }
                 }
             )
             guard shouldAutoSave, !reuseHistoryFile else { return }

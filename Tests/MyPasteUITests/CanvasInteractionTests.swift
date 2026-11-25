@@ -65,7 +65,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testDrawingRectangleCreatesAnnotation() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("r", keyCode: 15)
+        press("r", keyCode: 15, modifiers: .command)
         drag(from: CGPoint(x: 150, y: 150), to: CGPoint(x: 300, y: 250))
 
         XCTAssertEqual(canvas.annotations.count, 1)
@@ -80,7 +80,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testUndoAndRedo() {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("r", keyCode: 15)
+        press("r", keyCode: 15, modifiers: .command)
         drag(from: CGPoint(x: 150, y: 150), to: CGPoint(x: 300, y: 250))
         canvas.undo(nil)
         XCTAssertTrue(canvas.annotations.isEmpty)
@@ -90,7 +90,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testNumberAndEraser() {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("n", keyCode: 45)
+        press("n", keyCode: 45, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         XCTAssertEqual(canvas.annotations.count, 1)
         if case let .number(_, value) = canvas.annotations[0].kind {
@@ -98,14 +98,14 @@ final class CanvasInteractionTests: XCTestCase {
         } else {
             XCTFail("Expected number annotation")
         }
-        press("x", keyCode: 7)
+        press("x", keyCode: 7, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         XCTAssertTrue(canvas.annotations.isEmpty)
     }
 
     func testTextEditingCommitsAnnotation() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("t", keyCode: 17)
+        press("t", keyCode: 17, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         let box = try XCTUnwrap(canvas.textEditingBox)
         box.textField.stringValue = "Hello MyPaste"
@@ -122,7 +122,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testFontSizeAppliesToEditingAndCommittedText() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("t", keyCode: 17)
+        press("t", keyCode: 17, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         let box = try XCTUnwrap(canvas.textEditingBox)
         box.textField.stringValue = "Hello"
@@ -153,7 +153,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testDraggingInputBoxHeaderMovesText() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("t", keyCode: 17)
+        press("t", keyCode: 17, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         let box = try XCTUnwrap(canvas.textEditingBox)
         box.textField.stringValue = "Hello MyPaste"
@@ -175,7 +175,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testCommittedTextCanBeMovedAndEdited() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("t", keyCode: 17)
+        press("t", keyCode: 17, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         let box = try XCTUnwrap(canvas.textEditingBox)
         box.textField.stringValue = "Hello MyPaste"
@@ -242,7 +242,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testArrowNudgeCoalescesIntoOneUndoStep() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("t", keyCode: 17)
+        press("t", keyCode: 17, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         let box = try XCTUnwrap(canvas.textEditingBox)
         box.textField.stringValue = "Nudge"
@@ -273,7 +273,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testPrepareForExportComposesAnnotations() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("r", keyCode: 15)
+        press("r", keyCode: 15, modifiers: .command)
         drag(from: CGPoint(x: 150, y: 150), to: CGPoint(x: 300, y: 250))
         let prepared = try XCTUnwrap(canvas.prepareForExport())
         let composed = try XCTUnwrap(ImageComposer.compose(
@@ -312,7 +312,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testPenDrawingCollectsPoints() {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("b", keyCode: 11)
+        press("b", keyCode: 11, modifiers: .command)
         sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 150), clickCount: 1)
         sendMouse(.leftMouseDragged, at: CGPoint(x: 200, y: 180), clickCount: 1)
         sendMouse(.leftMouseDragged, at: CGPoint(x: 260, y: 200), clickCount: 1)
@@ -326,7 +326,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testShiftConstrainsSquareAndArrowAngle() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("r", keyCode: 15)
+        press("r", keyCode: 15, modifiers: .command)
         sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 150), clickCount: 1, modifiers: .shift)
         sendMouse(.leftMouseDragged, at: CGPoint(x: 300, y: 210), clickCount: 1, modifiers: .shift)
         sendMouse(.leftMouseUp, at: CGPoint(x: 300, y: 210), clickCount: 1, modifiers: .shift)
@@ -335,7 +335,7 @@ final class CanvasInteractionTests: XCTestCase {
         }
         XCTAssertEqual(rect.width, rect.height, accuracy: 0.5)
 
-        press("a", keyCode: 0)
+        press("a", keyCode: 0, modifiers: .command)
         sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 300), clickCount: 1, modifiers: .shift)
         sendMouse(.leftMouseDragged, at: CGPoint(x: 300, y: 320), clickCount: 1, modifiers: .shift)
         sendMouse(.leftMouseUp, at: CGPoint(x: 300, y: 320), clickCount: 1, modifiers: .shift)
@@ -348,7 +348,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testRightClickCancelsStrokeButKeepsSession() {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("r", keyCode: 15)
+        press("r", keyCode: 15, modifiers: .command)
         sendMouse(.leftMouseDown, at: CGPoint(x: 150, y: 150), clickCount: 1)
         sendMouse(.leftMouseDragged, at: CGPoint(x: 300, y: 250), clickCount: 1)
         canvas.rightMouseDown(with: NSEvent.mouseEvent(
@@ -382,7 +382,7 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testUndoStackCappedAt50() {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 700, y: 550))
-        press("n", keyCode: 45)
+        press("n", keyCode: 45, modifiers: .command)
         for index in 0..<55 {
             click(at: CGPoint(x: 120 + CGFloat(index) * 8, y: 150))
         }
@@ -395,9 +395,9 @@ final class CanvasInteractionTests: XCTestCase {
 
     func testCachedAnnotationLayerRendersSameAsDirect() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("r", keyCode: 15)
+        press("r", keyCode: 15, modifiers: .command)
         drag(from: CGPoint(x: 150, y: 150), to: CGPoint(x: 350, y: 280))
-        press("n", keyCode: 45)
+        press("n", keyCode: 45, modifiers: .command)
         click(at: CGPoint(x: 420, y: 350))
 
         func renderCanvas() throws -> CGImage {
@@ -609,11 +609,11 @@ final class CanvasInteractionTests: XCTestCase {
         canvas.keyDown(with: event)
     }
 
-    private func press(_ character: String, keyCode: UInt16) {
+    private func press(_ character: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) {
         guard let event = NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
-            modifierFlags: [],
+            modifierFlags: modifiers,
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: 0,
             context: nil,

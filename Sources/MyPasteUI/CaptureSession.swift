@@ -234,9 +234,10 @@ public final class CaptureSession {
 
         savePanel = panel
         isPresentingPanel = true
-        // 面板由 savePanel 属性强持有直到 sheet 结束，闭包只弱引用 self/canvas/window：
-        // 闭包若强捕获 panel 会与面板持有的 completionHandler 形成环，
-        // 连带留住已合成的整屏位图，直到进程退出才释放
+        // 闭包强捕获 panel：实测 NSSavePanel 在 sheet 结束后会释放 completionHandler，
+        // panel → handler → panel 不构成保留环（v1.3 台账曾误判，已更正）。
+        // 强捕获是必要的：会话若在 sheet 期间提前关闭，savePanel 会被置空，
+        // 此时只有闭包里的 panel 还能给出 URL，否则保存会静默失效。
         panel.beginSheetModal(for: window) { [weak self, weak canvas, weak window] response in
             guard let self else { return }
             self.isPresentingPanel = false
@@ -244,8 +245,7 @@ public final class CaptureSession {
                 self.savePanel = nil
                 return
             }
-            // URL 从强持有的 savePanel 读取：面板在 sheet 期间不会被释放
-            if response == .OK, let url = self.savePanel?.url {
+            if response == .OK, let url = panel.url {
                 // 先结束会话再写盘：写盘期间保持可交互会让取消/继续编辑静默覆盖保存结果；
                 // 成败都必须回调宿主，否则会话对象会滞留在控制器里导致后续截图失效
                 let image = result.image

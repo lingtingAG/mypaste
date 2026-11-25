@@ -40,6 +40,9 @@ private final class ToolbarButton: NSButton {
         imageScaling = .scaleProportionallyDown
         setButtonType(.momentaryChange)
         refusesFirstResponder = true
+        // 显式清空标题：图像缺失时 AppKit 会改画按钮标题（系统本地化名称），
+        // 工具栏上会冒出「格式」这类与功能无关的字样
+        title = ""
         self.toolTip = tooltip
         setAccessibilityLabel(accessibilityLabel)
         contentTintColor = .white
@@ -61,12 +64,19 @@ private final class ToolbarButton: NSButton {
     static func symbol(names: [String], pointSize: CGFloat, weight: NSFont.Weight) -> NSImage? {
         let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
         for name in names {
-            if let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
-                return image.withSymbolConfiguration(configuration)
+            guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { continue }
+            // withSymbolConfiguration 可能返回 nil（符号在当前系统不可用），要继续试下一个候选
+            if let configured = image.withSymbolConfiguration(configuration) {
+                return configured
             }
         }
-        return NSImage(systemSymbolName: "questionmark", accessibilityDescription: nil)?
-            .withSymbolConfiguration(configuration)
+        for fallback in ["questionmark.square.dashed", "questionmark"] {
+            guard let image = NSImage(systemSymbolName: fallback, accessibilityDescription: nil) else { continue }
+            if let configured = image.withSymbolConfiguration(configuration) {
+                return configured
+            }
+        }
+        return nil
     }
 
     override func updateTrackingAreas() {
@@ -299,6 +309,11 @@ private final class FontSizeButton: NSButton {
     }
 
     override func mouseDown(with event: NSEvent) {
+        presentMenu(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// 弹出字号菜单：鼠标点击与 ⌘⇧F 快捷键共用
+    func presentMenu(at point: CGPoint) {
         let menu = NSMenu()
         menu.appearance = NSAppearance(named: .darkAqua)
         var sizes = Self.sizes
@@ -317,7 +332,7 @@ private final class FontSizeButton: NSButton {
             item.state = abs(size - fontSize) < 0.1 ? .on : .off
             menu.addItem(item)
         }
-        menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
+        menu.popUp(positioning: nil, at: point, in: self)
     }
 
     @objc private func chooseSize(_ sender: NSMenuItem) {
@@ -368,9 +383,11 @@ public final class EditorToolbarView: NSView {
     private let redoButton: ToolbarButton
     private let fillButton: ToolbarButton
     private let fontSizeButton: FontSizeButton
-    private let hintLabel: NSTextField
     private let drawOptionsStack = NSStackView()
     private let textOptionsStack = NSStackView()
+    // 内容栈：用于按实际内容算面板高度（写死高度会让按钮溢出面板）
+    private var contentStack: NSStackView?
+    private var contentHeight: CGFloat = 72
 
     private static let tools: [Tool] = [
         .move, .rectangle, .ellipse, .arrow, .pen, .marker, .text, .mosaic, .blur, .number, .eraser,
@@ -403,12 +420,11 @@ public final class EditorToolbarView: NSView {
         )
         fillButton = ToolbarButton(
             symbolNames: ["square.fill"],
-            tooltip: "填充形状",
+            tooltip: "填充形状 (⌘F)",
             accessibilityLabel: "填充形状"
         )
         fontSizeButton = FontSizeButton(fontSize: AppSettings.shared.toolFontSize)
-        hintLabel = NSTextField(labelWithString: "Enter 复制   ·   P 贴图   ·   S 保存   ·   C 取色   ·   Esc 取消")
-        super.init(frame: NSRect(x: 0, y: 0, width: 544, height: 92))
+        super.init(frame: NSRect(x: 0, y: 0, width: 544, height: 72))
 
         appearance = NSAppearance(named: .darkAqua)
         wantsLayer = true
@@ -432,7 +448,20 @@ public final class EditorToolbarView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override var intrinsicContentSize: NSSize {
-        NSSize(width: 544, height: 92)
+        NSSize(width: 544, height: contentHeight)
+    }
+
+    /// 内容是否完全落在面板内（回归测试）：
+    /// 移除底部说明行后若面板高度写死过小，按钮会溢出圆角面板
+    var contentFitsPanel: Bool {
+        guard let contentStack else { return true }
+        contentStack.layoutSubtreeIfNeeded()
+        return contentStack.frame.height <= bounds.height + 0.5
+    }
+
+    /// 工具按钮中符号解析失败的个数（回归测试：符号缺失会显示成系统本地化名称）
+    var missingToolSymbolCount: Int {
+        toolButtons.values.filter { $0.image == nil }.count
     }
 
     public override func draw(_ dirtyRect: NSRect) {
@@ -476,15 +505,6 @@ public final class EditorToolbarView: NSView {
         let textContext = tool == .text || showsTextOptions
         drawOptionsStack.isHidden = textContext
         textOptionsStack.isHidden = !textContext
-        if isTextEditing {
-            hintLabel.stringValue = "输入文字   ·   拖动顶部手柄移动   ·   Enter 确认   ·   Esc 取消"
-        } else if tool == .text {
-            hintLabel.stringValue = "点击放置文字   ·   选择字号   ·   Enter 确认   ·   Esc 取消"
-        } else if textContext {
-            hintLabel.stringValue = "拖动文字移动   ·   双击重新编辑   ·   字号可调   ·   Delete 删除"
-        } else {
-            hintLabel.stringValue = "Enter 复制   ·   P 贴图   ·   S 保存   ·   C 取色   ·   Esc 取消"
-        }
         undoButton.isEnabled = canUndo
         undoButton.alphaValue = canUndo ? 1 : 0.35
         redoButton.isEnabled = canRedo
@@ -516,9 +536,9 @@ public final class EditorToolbarView: NSView {
         row1.setCustomSpacing(8, after: redoButton)
         row1.addArrangedSubview(separator())
 
-        let copyButton = ToolbarButton(symbolNames: ["doc.on.doc"], tooltip: "复制 (Enter)", accessibilityLabel: "复制")
-        let saveButton = ToolbarButton(symbolNames: ["square.and.arrow.down"], tooltip: "保存 (S)", accessibilityLabel: "保存")
-        let pinButton = ToolbarButton(symbolNames: ["pin"], tooltip: "贴图 (P)", accessibilityLabel: "贴图")
+        let copyButton = ToolbarButton(symbolNames: ["doc.on.doc"], tooltip: "复制 (⌘C)", accessibilityLabel: "复制")
+        let saveButton = ToolbarButton(symbolNames: ["square.and.arrow.down"], tooltip: "保存 (⌘S)", accessibilityLabel: "保存")
+        let pinButton = ToolbarButton(symbolNames: ["pin"], tooltip: "贴图 (⌘P)", accessibilityLabel: "贴图")
         let closeButton = ToolbarButton(symbolNames: ["xmark"], tooltip: "取消 (Esc)", accessibilityLabel: "取消")
         copyButton.isAccent = true
         copyButton.target = self
@@ -574,23 +594,22 @@ public final class EditorToolbarView: NSView {
             guard let self else { return }
             self.delegate?.toolbar(self, perform: .selectFontSize(size))
         }
+        fontSizeButton.toolTip = "字号 (⌘⇧F)"
         textOptionsStack.addArrangedSubview(fontSizeButton)
         row2.addArrangedSubview(textOptionsStack)
         textOptionsStack.isHidden = true
 
-        hintLabel.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
-        hintLabel.textColor = NSColor.white.withAlphaComponent(0.42)
-        hintLabel.lineBreakMode = .byTruncatingTail
-        hintLabel.maximumNumberOfLines = 1
-        hintLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        let content = NSStackView(views: [row1, row2, hintLabel])
+        let content = NSStackView(views: [row1, row2])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 5
         content.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 7, right: 10)
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(content)
+        contentStack = content
+        // 按内容实测高度，底部说明行移除后不再写死数值
+        content.layoutSubtreeIfNeeded()
+        contentHeight = max(64, content.fittingSize.height)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: leadingAnchor),
             content.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -603,15 +622,21 @@ public final class EditorToolbarView: NSView {
         ToolbarSeparator()
     }
 
+    /// ⌘⇧F：弹出字号菜单
+    public func presentFontSizeMenu() {
+        let center = NSPoint(x: bounds.midX, y: bounds.midY)
+        fontSizeButton.presentMenu(at: fontSizeButton.convert(center, from: nil))
+    }
+
     private static func symbolNames(for tool: Tool) -> [String] {
         switch tool {
-        case .move: return ["cursorarrow", "arrow.up.and.down.and.arrow.left.and.right"]
+        case .move: return ["arrow.up.and.down.and.arrow.left.and.right", "cursorarrow"]
         case .rectangle: return ["rectangle"]
         case .ellipse: return ["circle"]
         case .arrow: return ["arrow.up.right"]
         case .pen: return ["pencil.tip"]
         case .marker: return ["highlighter"]
-        case .text: return ["textformat"]
+        case .text: return ["textformat", "character", "textformat.alt"]
         case .mosaic: return ["square.grid.3x3.fill", "square.grid.3x3"]
         case .blur: return ["camera.filters", "drop.halffull", "drop.fill"]
         case .number: return ["number.circle", "1.circle"]
@@ -619,19 +644,20 @@ public final class EditorToolbarView: NSView {
         }
     }
 
+    /// 每个工具的 ⌘ 组合键；与 SelectionCanvasView.handleCommandShortcut 一一对应
     private static func toolShortcutHint(for tool: Tool) -> String {
         switch tool {
-        case .move: return " (V)"
-        case .rectangle: return " (R)"
-        case .ellipse: return " (E)"
-        case .arrow: return " (A)"
-        case .pen: return " (B)"
-        case .marker: return " (H)"
-        case .text: return " (T)"
-        case .mosaic: return " (M)"
-        case .blur: return " (U)"
-        case .number: return " (N)"
-        case .eraser: return " (X)"
+        case .move: return " (⌘V)"
+        case .rectangle: return " (⌘R)"
+        case .ellipse: return " (⌘E)"
+        case .arrow: return " (⌘A)"
+        case .pen: return " (⌘B)"
+        case .marker: return " (⌘I)"
+        case .text: return " (⌘T)"
+        case .mosaic: return " (⌘D)"
+        case .blur: return " (⌘U)"
+        case .number: return " (⌘N)"
+        case .eraser: return " (⌘X)"
         }
     }
 

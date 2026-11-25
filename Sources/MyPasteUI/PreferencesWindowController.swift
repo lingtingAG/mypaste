@@ -99,12 +99,23 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         let root = PreferencesRootView()
         window.contentView = root
 
+        // 内容装进滚动视图：说明章节较长，窗口不必无限加高
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        // 文档视图必须翻转：内容自上而下排布，翻转后滚动条初始位置才是顶部
+        let document = PreferencesRootView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = document
+        root.addSubview(scrollView)
+
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 16
         content.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(content)
+        document.addSubview(content)
 
         // Hotkeys
         let capture = ShortcutRecorderButton(shortcut: settings.captureShortcut)
@@ -247,6 +258,7 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         content.addArrangedSubview(hotkeySection)
         content.addArrangedSubview(screenshotSection)
         content.addArrangedSubview(systemSection)
+        content.addArrangedSubview(makeUsageGuideSection())
 
         let footer = NSTextField(labelWithString: "MyPaste 常驻菜单栏；屏幕录制权限变更后需要重新启动应用。")
         footer.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
@@ -261,9 +273,16 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         root.addSubview(done)
 
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
-            content.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -26),
-            content.topAnchor.constraint(equalTo: root.topAnchor, constant: 22),
+            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: root.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
+
+            content.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 26),
+            content.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -26),
+            content.topAnchor.constraint(equalTo: document.topAnchor, constant: 22),
+            content.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
+            content.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -52),
 
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20),
@@ -275,8 +294,55 @@ public final class PreferencesWindowController: NSObject, NSWindowDelegate {
         self.window = window
     }
 
-    private func displayPath(_ url: URL) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+    /// 「使用说明」章节：功能说明 + 截图编辑器 / 贴图窗口快捷键 + 隐藏与删除的区别
+    private func makeUsageGuideSection() -> NSView {
+        let intro = NSTextField(wrappingLabelWithString: Self.usageIntro)
+        intro.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        intro.textColor = .labelColor
+        intro.translatesAutoresizingMaskIntoConstraints = false
+        intro.preferredMaxLayoutWidth = 520
+
+        let shortcuts = NSTextField(wrappingLabelWithString: Self.usageShortcuts)
+        shortcuts.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        shortcuts.textColor = .secondaryLabelColor
+        shortcuts.translatesAutoresizingMaskIntoConstraints = false
+        shortcuts.preferredMaxLayoutWidth = 520
+
+        let notes = NSTextField(wrappingLabelWithString: Self.usageNotes)
+        notes.font = NSFont.systemFont(ofSize: 11.5, weight: .regular)
+        notes.textColor = .secondaryLabelColor
+        notes.translatesAutoresizingMaskIntoConstraints = false
+        notes.preferredMaxLayoutWidth = 520
+
+        return makeSection(
+            title: "使用说明",
+            rows: [intro, shortcuts, notes]
+        )
+    }
+
+    private static let usageIntro = """
+    MyPaste 常驻菜单栏，按 F1 截图、F3 贴图。截图、标注、贴图与历史记录全部在本机处理，\
+    不联网、不上传、无需账号。截图编辑器里的功能按钮都配有 ⌘ 组合键，按钮悬停可看到对应组合。
+    """
+
+    private static let usageShortcuts = """
+    截图编辑器（覆盖层内）
+      ⌘V 移动    ⌘R 矩形    ⌘E 椭圆    ⌘A 箭头    ⌘B 画笔
+      ⌘I 荧光笔  ⌘T 文字    ⌘D 马赛克  ⌘U 模糊    ⌘N 序号
+      ⌘X 橡皮擦  ⌘C 复制    ⌘S 保存    ⌘P 贴图    ⌘F 填充形状
+      ⌘⇧F 字号   ⌘Z 撤销    ⌘⇧Z 重做   ⌘⇧C 复制颜色
+      Esc 取消    Delete 删除选中文字（无选中文字时撤销上一步）
+
+    贴图窗口
+      ⌘C 复制    ⌘S 保存    ⌘⌫ 删除贴图    ⌘W 删除贴图    Esc 隐藏贴图
+    """
+
+    private static let usageNotes = """
+    贴图右键菜单里的「隐藏贴图」只是把贴图收起来，之后可从菜单栏「显示全部贴图」恢复；\
+    「删除贴图」会彻底移除这张贴图，不可恢复。取色器模式下单击屏幕即可复制颜色，Esc 退出。
+    """
+
+    private func displayPath(_ url: URL) -> String {        let home = FileManager.default.homeDirectoryForCurrentUser.path
         let path = url.path
         if path == home { return "~" }
         if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }

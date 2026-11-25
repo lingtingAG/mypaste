@@ -31,6 +31,8 @@ private struct AnnotationCache {
     let image: CGImage
     let selection: CGRect
     let annotations: [Annotation]
+    /// 位图内容对应的选区局部原点：整图位图为 .zero，瓦片为包围盒左上角
+    let origin: CGPoint
 }
 
 public final class BaseImageView: NSView {
@@ -64,14 +66,24 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
     private(set) var annotations: [Annotation] = [] {
         didSet {
             annotationCache = nil
+            annotationCacheHead = nil
             annotationCacheTail = nil
         }
     }
     private var annotationCache: AnnotationCache?
-    // 拖动中的文字把已提交标注切成前后两段分别缓存，保证层叠顺序与提交后一致
+    // 拖动中的文字把已提交标注切成前后两段分别缓存，保证层叠顺序与提交后一致。
+    // 两段按各自标注的包围盒渲染成瓦片，常驻内存与标注范围成正比而非整张选区
+    private var annotationCacheHead: AnnotationCache?
     private var annotationCacheTail: AnnotationCache?
     // 标注位图层实际重建次数（回归测试用）：拖动文字 / 移动选区不应逐帧重建整图
     private(set) var annotationLayerRenderCount = 0
+    /// 拖动期常驻瓦片的像素总数（回归测试用）：
+    /// 拖字时应与标注自身范围成正比，而不是整张选区的像素数
+    var cachedTilePixelCount: Int {
+        let head = annotationCacheHead.map { $0.image.width * $0.image.height } ?? 0
+        let tail = annotationCacheTail.map { $0.image.width * $0.image.height } ?? 0
+        return head + tail
+    }
     // 拖动中的文字：拖动过程不改动 annotations，避免每个鼠标事件重建标注位图
     private var movingTextOverlay: Annotation?
     // 会话级效果缓存：生命周期与画布/源图一致，避免跨会话串用与跨线程共享
@@ -472,23 +484,9 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             return
         }
 
-        if event.keyCode == 36 || event.keyCode == 76 {
-            if selection != nil {
-                session?.canvasRequestCopy(self)
-            }
-            return
-        }
-
+        // 统一走 ⌘ 组合键：工具栏每个按钮都有一个组合（与按钮提示一致）
         if event.modifierFlags.contains(.command) {
-            let characters = (event.charactersIgnoringModifiers ?? "").lowercased()
-            if characters == "s", selection != nil {
-                session?.canvasRequestSave(self)
-                return
-            }
-            if characters == "c", selection != nil {
-                session?.canvasRequestCopy(self)
-                return
-            }
+            if handleCommandShortcut(event) { return }
             super.keyDown(with: event)
             return
         }
@@ -522,29 +520,49 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             }
             return
         }
-        guard !event.modifierFlags.contains(.control) else {
-            super.keyDown(with: event)
-            return
-        }
+        super.keyDown(with: event)
+    }
 
+    /// 截图编辑器的 ⌘ 组合键：工具栏每个按钮对应一个组合。
+    /// 组合表与 EditorToolbarView 的按钮提示、设置里的使用说明保持一致。
+    private func handleCommandShortcut(_ event: NSEvent) -> Bool {
         let characters = (event.charactersIgnoringModifiers ?? "").lowercased()
+        let shift = event.modifierFlags.contains(.shift)
         switch characters {
         case "v": selectTool(.move)
         case "r": selectTool(.rectangle)
         case "e": selectTool(.ellipse)
         case "a": selectTool(.arrow)
         case "b": selectTool(.pen)
-        case "h": selectTool(.marker)
+        case "i": selectTool(.marker)
         case "t": selectTool(.text)
-        case "m": selectTool(.mosaic)
+        case "d": selectTool(.mosaic)
         case "u": selectTool(.blur)
         case "n": selectTool(.number)
         case "x": selectTool(.eraser)
-        case "p": session?.canvasRequestPin(self)
-        case "s": session?.canvasRequestSave(self)
-        case "c": copyColorUnderCursor()
-        default: super.keyDown(with: event)
+        case "c" where shift: copyColorUnderCursor()
+        case "c":
+            if selection != nil { session?.canvasRequestCopy(self) }
+        case "s" where !shift:
+            if selection != nil { session?.canvasRequestSave(self) }
+        case "p" where !shift:
+            session?.canvasRequestPin(self)
+        case "f" where shift:
+            toolbar?.presentFontSizeMenu()
+        case "f":
+            toggleFillShape()
+        default:
+            return false
         }
+        return true
+    }
+
+    /// ⌘F：切换形状填充（与工具栏「填充形状」按钮一致）
+    private func toggleFillShape() {
+        currentlyFilled.toggle()
+        AppSettings.shared.toolFilled = currentlyFilled
+        updateToolbarState()
+        needsDisplay = true
     }
 
     private func handleArrowKey(_ keyCode: UInt16, selection: CGRect, step: CGFloat, resize: Bool) -> Bool {
@@ -1286,7 +1304,6 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
                 drawCrosshair(at: cursorPoint, in: context)
                 drawMagnifier(at: cursorPoint, in: context)
             }
-            drawBottomHint("单击复制颜色   ·   移动鼠标查看像素   ·   Esc 退出", in: context)
             drawToast(in: context)
             return
         }
@@ -1314,9 +1331,6 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             }
         }
 
-        if selection == nil {
-            drawBottomHint("拖拽选择区域   ·   单击选择窗口   ·   C 复制颜色   ·   Esc 退出", in: context)
-        }
         drawToast(in: context)
     }
 
@@ -1385,27 +1399,30 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             let index = visibleAnnotations.firstIndex { $0.id == movingText.id }
             let head = index.map { Array(visibleAnnotations[..<$0]) } ?? visibleAnnotations
             let tail = index.map { Array(visibleAnnotations[visibleAnnotations.index(after: $0)...]) } ?? []
-            let (headLayer, headCache) = annotationLayer(for: selection, annotations: head, cached: annotationCache)
-            annotationCache = headCache
-            if let headLayer {
-                AnnotationRenderer.drawImageTopLeft(headLayer, in: localRect, in: context)
+            // 拖动期不再使用整张选区位图：释放它，常驻内存只与标注自身范围有关
+            annotationCache = nil
+            let (headTile, headCache) = annotationTileLayer(
+                for: selection,
+                annotations: head,
+                cached: annotationCacheHead
+            )
+            annotationCacheHead = headCache
+            if let headTile {
+                drawAnnotationTile(headTile.image, origin: headTile.origin, in: context)
             }
             // 拖动中的文字走像素空间渲染：与已提交位图、导出同一 CTM，
             // 否则字形抗锯齿会有细微差异（所见即所得要求逐像素一致）
-            if let tile = renderAnnotationTile(movingText, selection: selection, source: source) {
-                // 上下文已平移到选区原点，瓦片按选区局部坐标贴回
-                let tileRect = CGRect(
-                    x: tile.origin.x,
-                    y: tile.origin.y,
-                    width: CGFloat(tile.image.width) / captured.scale,
-                    height: CGFloat(tile.image.height) / captured.scale
-                )
-                AnnotationRenderer.drawImageTopLeft(tile.image, in: tileRect, in: context)
+            if let textTile = renderAnnotationTile([movingText], selection: selection, source: source) {
+                drawAnnotationTile(textTile.image, origin: textTile.origin, in: context)
             }
-            let (tailLayer, tailCache) = annotationLayer(for: selection, annotations: tail, cached: annotationCacheTail)
+            let (tailTile, tailCache) = annotationTileLayer(
+                for: selection,
+                annotations: tail,
+                cached: annotationCacheTail
+            )
             annotationCacheTail = tailCache
-            if let tailLayer {
-                AnnotationRenderer.drawImageTopLeft(tailLayer, in: localRect, in: context)
+            if let tailTile {
+                drawAnnotationTile(tailTile.image, origin: tailTile.origin, in: context)
             }
         } else {
             let (layer, cache) = annotationLayer(for: selection, annotations: visibleAnnotations, cached: annotationCache)
@@ -1462,20 +1479,73 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
             return (nil, nil)
         }
         annotationLayerRenderCount += 1
-        return (image, AnnotationCache(image: image, selection: selection, annotations: annotations))
+        return (
+            image,
+            AnnotationCache(image: image, selection: selection, annotations: annotations, origin: .zero)
+        )
     }
 
-    /// 把单个标注渲染成小瓦片：与整张选区位图使用同一像素空间 CTM，
+    /// 渲染并缓存一段标注的**瓦片**（按标注自身包围盒裁剪）。
+    /// 常驻内存与标注实际范围成正比，而不是整张选区；瓦片原点对齐选区像素网格，
+    /// 像素空间 CTM 与整图位图一致 → 与提交结果逐像素一致。
+    private func annotationTileLayer(
+        for selection: CGRect,
+        annotations: [Annotation],
+        cached: AnnotationCache?
+    ) -> (tile: AnnotationCache?, cache: AnnotationCache?) {
+        if let cached, cached.selection == selection, cached.annotations == annotations {
+            return (cached, cached)
+        }
+        guard !annotations.isEmpty else {
+            return (nil, nil)
+        }
+        let source = RenderSource(
+            image: captured.image,
+            originInImage: Geometry.pixelRect(for: selection, scale: captured.scale).origin,
+            pixelsPerPoint: captured.scale
+        )
+        guard let rendered = renderAnnotationTile(annotations, selection: selection, source: source) else {
+            return (nil, nil)
+        }
+        annotationLayerRenderCount += 1
+        let cache = AnnotationCache(
+            image: rendered.image,
+            selection: selection,
+            annotations: annotations,
+            origin: rendered.origin
+        )
+        return (cache, cache)
+    }
+
+    /// 把瓦片按其选区局部原点贴回画布（上下文已平移到选区原点）
+    private func drawAnnotationTile(_ image: CGImage, origin: CGPoint, in context: CGContext) {
+        let scale = captured.scale
+        let rect = CGRect(
+            x: origin.x,
+            y: origin.y,
+            width: CGFloat(image.width) / scale,
+            height: CGFloat(image.height) / scale
+        )
+        AnnotationRenderer.drawImageTopLeft(image, in: rect, in: context)
+    }
+
+    /// 把一段标注渲染成小瓦片：与整张选区位图使用同一像素空间 CTM，
     /// 且瓦片原点对齐到选区像素网格，保证光栅化相位一致（逐像素可复现）。
-    /// 用于拖动中的文字实时预览，避免每个鼠标事件重建整张选区位图。
+    /// 用于拖动中的文字实时预览与前后两段，避免每个鼠标事件重建整张选区位图。
     private func renderAnnotationTile(
-        _ annotation: Annotation,
+        _ annotations: [Annotation],
         selection: CGRect,
         source: RenderSource
     ) -> (image: CGImage, origin: CGPoint)? {
+        guard !annotations.isEmpty else { return nil }
         let scale = captured.scale
-        let bounds = annotation.bounds.insetBy(dx: -4, dy: -4)
-        guard bounds.width > 0, bounds.height > 0, scale > 0 else { return nil }
+        var bounds = CGRect.null
+        for annotation in annotations {
+            bounds = bounds.union(annotation.bounds)
+        }
+        guard !bounds.isNull, bounds.width > 0, bounds.height > 0, scale > 0 else { return nil }
+        // 外扩一点，避免描边与抗锯齿在瓦片边缘被裁掉
+        bounds = bounds.insetBy(dx: -4, dy: -4)
         // 原点对齐到选区像素网格：相对选区原点偏移整像素，保证相位与整图位图一致
         let originX = (bounds.minX * scale).rounded(.down) / scale
         let originY = (bounds.minY * scale).rounded(.down) / scale
@@ -1496,12 +1566,21 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         context.scaleBy(x: 1, y: -1)
         context.scaleBy(x: scale, y: scale)
         context.translateBy(x: -originX, y: -originY)
-        AnnotationRenderer.draw(
-            annotation: annotation,
-            in: context,
-            source: source,
-            effectCache: effectCache
-        )
+        // 与整图位图路径等价：裁剪到选区范围（瓦片坐标 = 选区局部坐标 - origin）
+        context.clip(to: CGRect(
+            x: -originX,
+            y: -originY,
+            width: selection.width,
+            height: selection.height
+        ))
+        for annotation in annotations {
+            AnnotationRenderer.draw(
+                annotation: annotation,
+                in: context,
+                source: source,
+                effectCache: effectCache
+            )
+        }
         guard let image = context.makeImage() else { return nil }
         return (image, CGPoint(x: originX, y: originY))
     }
@@ -1801,32 +1880,6 @@ public final class SelectionCanvasView: NSView, EditorToolbarDelegate {
         )
     }
 
-    private func drawBottomHint(_ text: String, in context: CGContext) {
-        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.white.withAlphaComponent(0.82),
-        ]
-        let textSize = (text as NSString).size(withAttributes: attributes)
-        let pillSize = CGSize(width: textSize.width + 26, height: textSize.height + 14)
-        let rect = CGRect(
-            x: (bounds.width - pillSize.width) / 2,
-            y: bounds.height - pillSize.height - 30,
-            width: pillSize.width,
-            height: pillSize.height
-        )
-        NSColor(calibratedWhite: 0.06, alpha: 0.7).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
-        NSColor.white.withAlphaComponent(0.12).setStroke()
-        let border = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
-        border.lineWidth = 1
-        border.stroke()
-        (text as NSString).draw(
-            at: CGPoint(x: rect.minX + 13, y: rect.minY + 7),
-            withAttributes: attributes
-        )
-        _ = context
-    }
 
     private func drawToast(in context: CGContext) {
         guard let toastText else { return }

@@ -80,14 +80,96 @@ final class Version13Tests: XCTestCase {
         XCTAssertGreaterThan(origin.x, originBefore.x, "拖动结束后文字位置应落到已提交集合")
     }
 
-    // MARK: - 所见即所得：拖动预览与提交结果必须一致
+    // MARK: - 工具栏外观
 
+    func testToolbarContentFitsPanelAndAllSymbolsResolve() throws {
+        let toolbar = EditorToolbarView()
+        toolbar.update(
+            tool: .move,
+            color: .red,
+            lineWidth: 4,
+            filled: false,
+            fontSize: 20,
+            showsTextOptions: false,
+            isTextEditing: false,
+            canUndo: false,
+            canRedo: false
+        )
+        toolbar.frame = NSRect(x: 0, y: 0, width: 544, height: toolbar.intrinsicContentSize.height)
+        toolbar.layoutSubtreeIfNeeded()
+        // 移除底部说明行后若面板高度写死过小，复制等按钮会溢出圆角面板
+        XCTAssertTrue(toolbar.contentFitsPanel, "工具栏内容不能溢出面板")
+        // 符号解析失败时按钮会画出系统本地化名称（例如出现「格式」字样）
+        XCTAssertEqual(toolbar.missingToolSymbolCount, 0, "所有工具按钮都必须有可用符号")
+    }
+
+    // MARK: - 快捷键统一为 ⌘ 组合
+
+    func testEditorToolShortcutsRequireCommandModifier() throws {
+        drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
+        XCTAssertEqual(canvas.tool, .move)
+
+        // 单字母不再切换工具：所有按钮统一用 ⌘ 组合
+        press("r", keyCode: 15)
+        XCTAssertNotEqual(canvas.tool, .rectangle, "单字母快捷键应已停用")
+
+        press("r", keyCode: 15, modifiers: .command)
+        XCTAssertEqual(canvas.tool, .rectangle)
+        press("n", keyCode: 45, modifiers: .command)
+        XCTAssertEqual(canvas.tool, .number)
+        press("i", keyCode: 34, modifiers: .command)
+        XCTAssertEqual(canvas.tool, .marker)
+        press("d", keyCode: 2, modifiers: .command)
+        XCTAssertEqual(canvas.tool, .mosaic)
+    }
+
+    // MARK: - 贴图菜单：隐藏与删除是两件事
+
+    func testPinMenuDistinguishesHideFromDelete() throws {
+        let screen = try XCTUnwrap(NSScreen.main ?? NSScreen.screens.first)
+        let pin = PinWindowController(
+            image: Self.makeImage(width: 40, height: 30),
+            frame: NSRect(x: 0, y: 0, width: 40, height: 30),
+            originalText: nil
+        )
+        defer { pin.closePin() }
+        _ = screen
+        let view = try XCTUnwrap(pin.window?.contentView as? PinContentView)
+        let titles = view.makeContextMenu().items.map(\.title)
+        XCTAssertTrue(
+            titles.contains { $0.hasPrefix("隐藏贴图") },
+            "隐藏贴图应保留：只是收起，可从菜单栏恢复"
+        )
+        XCTAssertTrue(titles.contains("删除贴图"), "应提供明确的删除贴图入口")
+        XCTAssertFalse(titles.contains("关闭贴图"), "旧的「关闭贴图」命名应被删除贴图取代")
+    }
+
+    // MARK: - 拖动期常驻内存：与标注范围成正比，而不是整张选区
+
+    func testTextDragKeepsCachedTilesSmall() throws {
+        try prepareTextAnnotation()
+        // 选区 400×300 pt @2x = 240,000 px；拖字期间常驻的只是文字瓦片
+        let selectionPixels = 400 * 300 * 4
+
+        sendMouse(.leftMouseDown, at: CGPoint(x: 205, y: 205), clickCount: 1)
+        sendMouse(.leftMouseDragged, at: CGPoint(x: 260, y: 240), clickCount: 1)
+        _ = try renderCanvas()
+
+        XCTAssertLessThan(
+            canvas.cachedTilePixelCount,
+            selectionPixels / 4,
+            "拖字常驻的瓦片应远小于整张选区位图"
+        )
+        sendMouse(.leftMouseUp, at: CGPoint(x: 260, y: 240), clickCount: 1)
+    }
+
+    // MARK: - 所见即所得：拖动预览与提交结果必须一致
     func testTextDragPreviewMatchesCommittedResult() throws {
         try prepareTextAnnotation()
         // 再加一个矩形压住文字，强制走「前段 + 拖动文字 + 后段」的分段路径
-        press("r", keyCode: 15)
+        press("r", keyCode: 15, modifiers: .command)
         drag(from: CGPoint(x: 180, y: 180), to: CGPoint(x: 320, y: 260))
-        press("v", keyCode: 9)
+        press("v", keyCode: 9, modifiers: .command)
 
         sendMouse(.leftMouseDown, at: CGPoint(x: 205, y: 205), clickCount: 1)
         sendMouse(.leftMouseDragged, at: CGPoint(x: 260, y: 240), clickCount: 1)
@@ -125,7 +207,7 @@ final class Version13Tests: XCTestCase {
 
     func testMovingSelectionDoesNotRebuildAnnotationLayer() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("r", keyCode: 15)
+        press("r", keyCode: 15, modifiers: .command)
         drag(from: CGPoint(x: 150, y: 150), to: CGPoint(x: 300, y: 250))
         _ = try renderCanvas()
         let rendersBeforeMove = canvas.annotationLayerRenderCount
@@ -198,7 +280,7 @@ final class Version13Tests: XCTestCase {
     /// 建立一个选区并提交一段文字标注
     private func prepareTextAnnotation() throws {
         drag(from: CGPoint(x: 100, y: 100), to: CGPoint(x: 500, y: 400))
-        press("t", keyCode: 17)
+        press("t", keyCode: 17, modifiers: .command)
         click(at: CGPoint(x: 200, y: 200))
         let box = try XCTUnwrap(canvas.textEditingBox)
         box.textField.stringValue = "Drag me"
@@ -223,11 +305,11 @@ final class Version13Tests: XCTestCase {
         sendMouse(.leftMouseUp, at: point, clickCount: 1)
     }
 
-    private func press(_ character: String, keyCode: UInt16) {
+    private func press(_ character: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) {
         guard let event = NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
-            modifierFlags: [],
+            modifierFlags: modifiers,
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: 0,
             context: nil,

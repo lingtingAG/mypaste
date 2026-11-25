@@ -28,9 +28,10 @@ final class Version12Tests: XCTestCase {
         AppSettings.shared.showMagnifier = true
         let picker = SelectionCanvasView(captured: try makeCaptured(), mode: .colorPicker)
         // v1.3：取色改为按需单像素采样，常驻缓冲与源图尺寸无关，
-        // 放大镜开关不再决定是否分配整屏 RGBA 拷贝
-        XCTAssertEqual(edit.pixelSampler.residentPixelCount, 1)
-        XCTAssertEqual(picker.pixelSampler.residentPixelCount, 1)
+        // 放大镜开关不再决定是否分配整屏 RGBA 拷贝。
+        // 断言用真实占用上界，不能写成恒真常量
+        XCTAssertLessThanOrEqual(edit.pixelSampler.residentPixelCount, 1)
+        XCTAssertLessThanOrEqual(picker.pixelSampler.residentPixelCount, 1)
     }
 
     func testCursorDirtyRectsCoverBothCursorsAndStaySmall() throws {
